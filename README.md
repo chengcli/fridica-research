@@ -124,29 +124,37 @@ backend writes under `journal_dir` (the journal, `results/` including codex's
 written: `sk-` not preceded by a letter or digit (and `sk-ant-`, `KEY_sk-proj-...`), `ghp_`/`gho_`/`ghs_`/`ghu_`/`ghr_`/`github_pat_`,
 `xoxa-`/`xoxb-`/`xoxe-`/`xoxo-`/`xoxp-`/`xoxr-`/`xoxs-`/`xapp-`, `Bearer <token>` (any case),
 `AKIA...` AWS key ids and `-----BEGIN ... PRIVATE KEY-----` blocks; the brief is kept only in
-the redacted journal line. Workers run with a scrubbed environment: the board's `token_env`,
-`FRIDICA_*`, `SLACK_*`, `AWS_*`, `GH_TOKEN`, `GITHUB_TOKEN`, `DATABASE_URL` and every `*_TOKEN` /
-`*_SECRET` / `*_KEY` / `*PASSWORD` / `*_PASS` / `*_CREDENTIALS` / `*_SOCK` (so `SSH_AUTH_SOCK`)
-are dropped, except the worker CLI's own credentials (`ANTHROPIC_API_KEY`, `ANTHROPIC_AUTH_TOKEN`,
-`CLAUDE_CODE_OAUTH_TOKEN` for claude; `OPENAI_API_KEY`, `CODEX_API_KEY` for codex; claude's
-OAuth login in `~/.claude` needs none of them) and the non-secret Bedrock/Vertex settings
-(`AWS_REGION`, `AWS_DEFAULT_REGION`, `AWS_PROFILE`, `GOOGLE_APPLICATION_CREDENTIALS`,
-`CLAUDE_CODE_USE_BEDROCK`, `CLAUDE_CODE_USE_VERTEX`, `CLOUD_ML_REGION`,
-`ANTHROPIC_VERTEX_PROJECT_ID`); `[backend.bootstrap] keep_env = ["NAME", ...]` keeps more by name. The scrub covers variables only: `HOME` is
+the redacted journal line. Workers get an allowlisted environment, not a scrubbed one: only
+`PATH`, `HOME`, `USER`, `LOGNAME`, `SHELL`, `LANG`, `LC_*`, `TERM`, `TMPDIR`, `TZ`, the worker
+CLI's own credentials (`ANTHROPIC_API_KEY`, `ANTHROPIC_AUTH_TOKEN`, `CLAUDE_CODE_OAUTH_TOKEN` for
+claude; `OPENAI_API_KEY`, `CODEX_API_KEY` for codex; claude's OAuth login in `~/.claude` needs
+none of them), the non-secret Bedrock/Vertex settings (`AWS_REGION`, `AWS_DEFAULT_REGION`,
+`AWS_PROFILE`, `GOOGLE_APPLICATION_CREDENTIALS`, `CLAUDE_CODE_USE_BEDROCK`,
+`CLAUDE_CODE_USE_VERTEX`, `CLOUD_ML_REGION`, `ANTHROPIC_VERTEX_PROJECT_ID`) and the names in
+`[backend.bootstrap] keep_env = ["NAME", ...]` reach a worker; everything else is dropped, and
+the board's `token_env` never reaches it. `keep_env` may not name the board's `token_env`,
+`FRIDICA_*`, `SLACK_*`, `GH_TOKEN`, `GITHUB_TOKEN`, `NPM_TOKEN`, `*_SECRET*`, `*_PAT`, `*PWD`,
+`*PASSWD` or a database/broker URL (`DATABASE_URL`, `*_DB_URL`, `REDIS_URL`, ...), and a kept
+variable whose value is a URL with credentials (`scheme://user:password@host`) is refused when
+the backend starts. The allowlist covers variables only: `HOME` is
 kept (claude's login lives under it), so file-based credentials under `HOME` (`~/.ssh`,
 `~/.aws`, `~/.config/gh`, `~/.netrc`, ...) stay readable by a worker running as the same user;
-run the driver as a dedicated user if that matters. A launched job that did not finish with a
-parsed result and whose output carries no cost (timed out, stopped, killed by a signal, crashed,
-truncated or unparseable output) is charged its full `max_budget_usd_per_job`; a ceiling of
-nan, inf or a negative number is a config error (exactly 0 means no ceiling). Each worker's
-process group, its leader's start time and its absolute deadline are kept in
-`runs/<ActionId>-a<attempt>.json`, so a driver restarted after a crash kills workers that
-outlived it past their deadline (only while the group's leader is still that process); a
-study's worktrees are removed (`git worktree remove --force`) when it reaches Delivered or
-Stopped (Blocked keeps them for the resume; one with a job, or a live orphan of a crashed
-driver, still running in it goes when that job ends). After a crash, a retry of an ActionId
-whose orphaned worker is still alive waits until that orphan ends or is killed at its deadline,
-so two workers never `--resume` the same claude session. The bootstrap backend is
+run the driver as a dedicated user if that matters. Every job is charged by one rule: the
+`total_cost_usd` the worker reported when it is a finite number >= 0, whatever the job's status
+(finished, failed, stopped, timed out); otherwise its full `max_budget_usd_per_job` when its
+worker was spawned (so a killed `claude -p` that printed nothing, or a NaN, infinite or
+negative cost, costs the reservation); 0 when the worker was never spawned (stopped in its
+backoff, a launch error). A ceiling of nan, inf or a negative number is a config error
+(exactly 0 means no ceiling). Each worker is started held: its process group, its leader's
+start time and its absolute deadline are written to `runs/<ActionId>-a<attempt>.json` before
+it is released to run (a driver that dies first leaves a held process that exits unrun), so a
+driver restarted after a crash kills workers that outlived it past their deadline (only while
+the group's leader is still that process); a study's worktrees are removed (`git worktree
+remove --force`) when it reaches Delivered or Stopped (Blocked keeps them for the resume; one
+with a job, or a live orphan of a crashed driver, still running in it goes when that job
+ends). After a crash, a retry of an ActionId whose orphaned worker is still alive waits until
+that orphan ends or is killed at its deadline; an orphan whose liveness cannot be checked
+(`ps` failed) counts as alive until its deadline, so two workers never `--resume` the same claude session. The bootstrap backend is
 frozen after the promotion of R2.
 
 ## Architecture

@@ -832,7 +832,7 @@ def test_a_same_action_id_retry_does_not_overwrite_the_orphans_process_group(tmp
     lists), so the retry is seen to wait on the liveness check, not on timing; it launches once `ps` reports it gone."""
     cfg = bootstrap_cfg(tmp_path, dataclasses.replace(CFG, projection={**CFG.projection, "explore": 100}))
     gate, procs, aid, starts = threading.Event(), [], "t/g1/i1/Explore/a1/explorer", {}
-    proc_start = (lambda pid: starts.get(int(pid))) if ps == "stand-in" else process_start
+    proc_start = (lambda pid: starts.get(int(pid), "")) if ps == "stand-in" else process_start  # "" = no such process (None = ps failed)
     def spawning(backend):
         def runner(argv, cwd, timeout):
             p = subprocess.Popen(["sh", "-c", "sleep 30 & sleep 30"], start_new_session=True)
@@ -1153,3 +1153,148 @@ def test_from_dict_runs_the_same_checks_as_parse(bad):
 def test_a_boolean_for_a_numeric_bootstrap_field_is_a_config_error(key):
     with pytest.raises(ValueError, match="boolean"):
         config.parse(f'[backend]\nkind = "bootstrap"\n[backend.bootstrap]\n{key} = true\n')
+
+
+# -- review fixes (iteration 3f): structural; each behavioural one fails on d669b21 ------------------------
+COSTS = {"3.0": "3.0", "no-cost": None, "NaN": "NaN", "Infinity": "Infinity", "-100": "-100"}
+ENDINGS = ["finished", "failed", "stopped", "timed-out", "runner-exception-after-spawn", "never-spawned"]
+
+
+def claude_out(cost: str | None) -> str:
+    """A claude result object with a valid WorkerResult and `total_cost_usd` spelled as given (None: no such field)."""
+    head = '{"type":"result","is_error":false,"session_id":"s",' + (f'"total_cost_usd":{cost},' if cost is not None else "")
+    return head + '"structured_output":' + json.dumps(payload(result(report="r"))) + "}"
+
+
+@pytest.mark.parametrize("cost", list(COSTS), ids=list(COSTS))
+@pytest.mark.parametrize("ending", ENDINGS)
+def test_one_cost_rule_charges_every_job(tmp_path, ending, cost):
+    """A: one rule (`charge`) for every job: the reported cost when known (finite, >= 0) whatever the status; the full reservation
+    for a spawned job without one; 0 for a job never spawned. With ceiling 5 and 5 per job, the second delegate is refused
+    whenever the first one was charged anything (on d669b21 a finished job with a NaN, infinite or negative cost was booked at $0)."""
+    out, gate, holder = claude_out(COSTS[cost]), threading.Event(), {}
+    class R:
+        def __call__(self, argv, cwd, timeout):
+            if ending == "finished": return out, 0
+            if ending == "failed": return out, 1
+            if ending == "timed-out": return out, None
+            if ending == "stopped":
+                gate.wait(10)
+                return out, -9
+            if ending == "runner-exception-after-spawn":
+                holder["b"]._spawned(argv, os.getpid())
+                raise RuntimeError("pipe broke")
+            raise FileNotFoundError("claude")  # never spawned
+        def kill(self, argv): gate.set()
+    backend = BootstrapBackend(bootstrap_cfg(tmp_path, max_budget_usd_per_job=5.0, max_cost_usd_per_study=5.0), runner=R(), sleep=lambda s: None, proc_start=lambda pid: None)
+    holder["b"] = backend
+    thread = "journal:C1:1.000000"
+    r = backend.delegate(thread, explorer_req("t/g1/i1/Explore/a1/explorer"))
+    if ending == "stopped":
+        assert wait_for(lambda: backend.jobs["job-1"].get("launched"))
+        backend.stop(thread, r["jobs"][0]["worker_id"])
+    backend.join(10)
+    backend.events(0)
+    known = cost == "3.0" and ending not in ("runner-exception-after-spawn", "never-spawned")
+    charge = 0.0 if ending == "never-spawned" else 3.0 if known else 5.0
+    status = {"finished": "finished", "stopped": "interrupted", "timed-out": "interrupted"}.get(ending, "failed")
+    jr = [x for x in backend.journal.all() if x["kind"] == "job_result"]
+    assert [(x["job_status"], x["total_cost_usd"]) for x in jr] == [(status, charge)] and (backend.spent(), backend.reserved()) == (charge, 0.0)
+    refused = False
+    try: backend.delegate(thread, explorer_req("t/g1/i1/Explore/a2/explorer"))
+    except ControlError as e:
+        refused = (e.status, e.code) == (429, "budget_exceeded")
+    backend.join(10)
+    assert refused == (charge > 0)  # so always refused when the charge is 5
+
+
+ALLOWED = {"HOME": "/h", "USER": "u", "LOGNAME": "u", "SHELL": "/bin/sh", "LANG": "C", "LC_ALL": "C", "LC_CTYPE": "C", "TERM": "dumb", "TMPDIR": "/tmp", "TZ": "UTC",
+           "ANTHROPIC_API_KEY": "a", "AWS_REGION": "us-east-1", "MY_PROXY_TOKEN": "m"}
+DROPPED = {"GITHUB_PAT": "p", "GH_PAT": "p", "MYSQL_PWD": "p", "DATABASE_URL": "postgres://u:p@h/d", "NPM_TOKEN": "n", "FOO_BAR": "f", "BOARD_CRED": "b", "OPENAI_API_KEY": "o"}
+SHELL_ADDED = {"PWD", "OLDPWD", "SHLVL", "_", "__CF_USER_TEXT_ENCODING"}  # set by the shell (or macOS) inside the worker, not passed by the driver
+
+
+def test_the_worker_environment_is_an_allowlist(tmp_path, monkeypatch):
+    """B: only the allowlisted names reach the worker; GITHUB_PAT, GH_PAT, MYSQL_PWD, DATABASE_URL, NPM_TOKEN, an unknown FOO_BAR and
+    the board token under a custom name (BOARD_CRED) do not (on d669b21 GITHUB_PAT, GH_PAT, MYSQL_PWD and FOO_BAR did)."""
+    allowed = {"PATH": os.environ["PATH"], **ALLOWED}
+    assert worker_env({**allowed, **DROPPED}, "claude", drop=("BOARD_CRED",), keep_env=("MY_PROXY_TOKEN",)) == allowed
+    assert worker_env({**allowed, **DROPPED}, "codex", keep_env=("MY_PROXY_TOKEN",)) == {**{k: v for k, v in allowed.items() if k != "ANTHROPIC_API_KEY"}, "OPENAI_API_KEY": "o"}
+    for k in list(os.environ): monkeypatch.delenv(k)
+    for k, v in {**allowed, **DROPPED}.items(): monkeypatch.setenv(k, v)
+    c = config.parse('[board]\ntoken_env = "BOARD_CRED"\n[backend]\nkind = "bootstrap"\n[backend.bootstrap]\nkeep_env = ["MY_PROXY_TOKEN"]\n')
+    cfg = dataclasses.replace(c, state_path=str(tmp_path / "s.sqlite3"), backend=config.Backend("bootstrap", dataclasses.replace(c.backend.bootstrap, journal_dir=str(tmp_path / "journal"))))
+    out, rc = BootstrapBackend(cfg, sleep=lambda s: None).runner(["sh", "-c", "env"], str(tmp_path), 10)  # the default runner
+    names = {line.split("=", 1)[0] for line in out.splitlines() if "=" in line}
+    assert rc == 0 and names - SHELL_ADDED == set(allowed)
+
+
+@pytest.mark.parametrize("name", ["GITHUB_PAT", "GH_PAT", "MYSQL_PWD", "PGPASSWD", "DATABASE_URL", "REDIS_URL", "APP_DB_URL", "NPM_TOKEN"])
+def test_keep_env_may_not_keep_pats_passwords_or_database_urls(name):
+    with pytest.raises(ValueError, match="keep_env may not keep"):
+        config.parse(f'[backend]\nkind = "bootstrap"\n[backend.bootstrap]\nkeep_env = ["{name}"]\n')
+
+
+def test_keep_env_may_not_keep_a_url_with_credentials(tmp_path, monkeypatch):
+    cfg = bootstrap_cfg(tmp_path, keep_env=("ANTHROPIC_BASE_URL",))
+    monkeypatch.setenv("ANTHROPIC_BASE_URL", "https://user:secret@proxy.example/v1")
+    with pytest.raises(ValueError, match="URL with credentials"): BootstrapBackend(cfg, sleep=lambda s: None)
+    monkeypatch.setenv("ANTHROPIC_BASE_URL", "https://proxy.example/v1")
+    assert "ANTHROPIC_BASE_URL" in BootstrapBackend(cfg, sleep=lambda s: None).runner.env
+
+
+def test_an_orphan_whose_liveness_is_unknown_is_alive_until_its_deadline(tmp_path):
+    """C: `ps` fails (start None): the orphan counts as alive until its recorded deadline, so the retry waits (on d669b21 it was
+    read as dead and the retry launched next to it at once)."""
+    cfg = bootstrap_cfg(tmp_path, dataclasses.replace(CFG, projection={**CFG.projection, "explore": 100}))
+    procs, cleanup = live_orphan(cfg)  # deadline 1200
+    try:
+        clock, polls, launched = Clock(1100.0), [], []
+        def sleep(s):
+            polls.append(clock.t)
+            if len(polls) == 3: clock.t = 1201.0  # past the deadline
+        def runner(argv, cwd, timeout):
+            launched.append(clock.t)
+            return claude_json(payload(result(report="r")), argv), 0
+        b2 = BootstrapBackend(cfg, runner=runner, clock=clock, sleep=sleep, proc_start=lambda pid: None)
+        assert b2._orphan_alive(b2.jobs["job-1"])
+        b2.delegate("journal:C1:1.000000", explorer_req("t/g1/i1/Explore/a1/explorer"))
+        b2.join(10)
+        assert polls == [1100.0, 1100.0, 1100.0] and launched == [1201.0]
+        assert process_start(procs[0].pid) not in (None, "") and process_start(2 ** 22 + 12345) == ""  # alive; no such process is "", not None
+    finally:
+        cleanup()
+
+
+def test_the_run_file_is_written_before_the_worker_runs(tmp_path, monkeypatch):
+    """C: the default runner holds the worker until its run file (pgid, deadline, attempt) is written: the worker's first act sees it
+    (on d669b21 the worker ran before `_spawned` recorded it, so a crash in between left a live worker with no run file)."""
+    cfg = bootstrap_cfg(tmp_path)
+    aid = "t/g1/i1/Explore/a1/explorer"
+    run_file, seen = Path(cfg.backend.bootstrap.journal_dir) / "runs" / f"{run_key(aid, 1)}.json", tmp_path / "seen"
+    bin_ = tmp_path / "bin"
+    bin_.mkdir()
+    (bin_ / "claude").write_text(f"#!/bin/sh\ncat '{run_file}' > '{seen}'\nprintf '%s' '{{\"type\":\"result\",\"total_cost_usd\":0.5,\"is_error\":true}}'\n")
+    (bin_ / "claude").chmod(0o755)
+    monkeypatch.setenv("PATH", f"{bin_}{os.pathsep}{os.environ['PATH']}")
+    slow_ps = lambda pid: (time.sleep(0.5), process_start(pid))[1]  # noqa: E731 - a slow record: an unheld worker would run first
+    backend = BootstrapBackend(cfg, sleep=lambda s: None, proc_start=slow_ps)  # the default runner
+    explore(backend, 1)
+    run = json.loads(seen.read_text())
+    assert (run["job_id"], run["attempt"]) == ("job-1", 1) and run["pgid"] > 0 and run["deadline"] > 0 and not run_file.exists()
+
+
+def test_a_worker_is_never_released_unrecorded(tmp_path):
+    """C: when recording fails the held worker is killed unrun (a launch error, charged 0); when the driver dies before the release
+    (the pipe closes), the held worker exits 70 without running."""
+    marker = tmp_path / "ran"
+    def boom(argv, pgid): raise OSError("disk full")
+    with pytest.raises(RuntimeError, match="not recorded"): ProcessRunner(on_spawn=boom)(["sh", "-c", f"touch '{marker}'"], str(tmp_path), 10)
+    from fridica_research.backend.bootstrap import held  # here, so the module still imports on d669b21 for the per-test comparison
+    hold, go = os.pipe()
+    p = subprocess.Popen(held(hold, ["sh", "-c", f"touch '{marker}'"]), pass_fds=(hold,), start_new_session=True)
+    os.close(hold)
+    os.close(go)  # the driver died before the release
+    assert p.wait(10) == 70
+    time.sleep(0.2)
+    assert not marker.exists()

@@ -179,8 +179,11 @@ def _backend(b: dict, token_env: str = "GH_TOKEN") -> Backend:
 
 
 CODEX_CEILING = "[backend.bootstrap] worker = \"codex\" needs max_cost_usd_per_study = 0 (no ceiling), stated explicitly: codex reports no cost, so a ceiling would never trip; or use worker = \"claude\""
-# Names `keep_env` may not bring back into a worker's environment: the board's token_env and these (the driver's own secrets).
-KEEP_ENV_FORBIDDEN = re.compile(r"^(FRIDICA_.*|SLACK_.*|GH_TOKEN|GITHUB_TOKEN|.*_SECRET.*)$")
+# Names `keep_env` may not bring back into a worker's environment: the board's token_env and these (the driver's own secrets,
+# personal access tokens, passwords, connection URLs that carry credentials). A kept name whose value turns out to be a URL
+# with credentials in it is refused when the backend starts (`bootstrap.worker_env`).
+KEEP_ENV_FORBIDDEN = re.compile(r"^(FRIDICA_.*|SLACK_.*|GH_TOKEN|GITHUB_TOKEN|NPM_TOKEN|.*_SECRET.*|.*_PAT|.*PWD|.*PASSWD"
+                                r"|(.*_)?(DATABASE|DB|REDIS|MONGO|MONGODB|POSTGRES|POSTGRESQL|PG|MYSQL|AMQP|RABBITMQ|BROKER)_URL)$")
 
 
 def _budget(k: str, v) -> float:

@@ -237,16 +237,18 @@ the restart probe are the same over either.
   re-sent ActionId or a resumed worker id, never a duplicate); bounds (process-group kill at
   2x the stage projection, exponential backoff before a retry of a seen ActionId,
   a retry stopped during its backoff never launches, `max_budget_usd_per_job` per worker and
-  `max_cost_usd_per_study` on the finished jobs' `total_cost_usd` plus a
+  `max_cost_usd_per_study` on the recorded charges plus a
   `max_budget_usd_per_job` reservation per job in flight, checked inside the journal lock and
-  released to the actual cost by the job's result: a delegate past it is refused with
-  `budget_exceeded`, which rule R turns into Blocked; a launched job that did not finish with
-  a parsed result and whose output carries no cost is charged its full reservation; a
+  released to the job's charge by its result: a delegate past it is refused with
+  `budget_exceeded`, which rule R turns into Blocked; one rule (`charge`) charges every job: the
+  reported cost when it is finite and >= 0, whatever the status; else the full reservation when
+  the worker was spawned; else 0 (never spawned); a
   non-finite or negative ceiling is a config error (0 = no ceiling); a retry never launches
-  while a live orphan of its ActionId runs (no two workers on one session); codex reports no cost, so `worker = "codex"` needs
-  an explicit `max_cost_usd_per_study = 0` (no ceiling); each worker's process group, leader
-  start time and absolute deadline are kept in `runs/<ActionId>-a<attempt>.json` and a
-  restarted backend kills the overdue groups of jobs that never reported, while the leader
+  while a live orphan of its ActionId runs (no two workers on one session), and an orphan whose
+  liveness is unknown (`ps` failed) counts as alive until its deadline; codex reports no cost, so `worker = "codex"` needs
+  an explicit `max_cost_usd_per_study = 0` (no ceiling); each worker is started held, and its process group, leader
+  start time and absolute deadline are written to `runs/<ActionId>-a<attempt>.json` before it
+  is released to run; a restarted backend kills the overdue groups of jobs that never reported, while the leader
   still has that start time); unreadable worker output is a failed job
   (`worker_output_unreadable`); a study's worktrees are removed when it reaches Delivered or
   Stopped (the backend's `release`; a worktree with a running job or a live orphan when it ends);
@@ -254,10 +256,11 @@ the restart probe are the same over either.
   `xox[abeoprs]-`/`xapp-`, `Bearer` in any case, `AKIA` key ids and PEM private key blocks never
   reach any file the backend writes: the journal, `results/` including codex's last-message
   file, `sessions/`, `workers/`, `runs/`; the brief is kept only in the journal line); workers
-  run with a scrubbed environment (no board `token_env`, `FRIDICA_*`, `SLACK_*`, `AWS_*`,
-  `GH_TOKEN`, `GITHUB_TOKEN`, `DATABASE_URL`, or other `*_TOKEN`/`*_SECRET`/`*_KEY`/
-  `*PASSWORD`/`*_PASS`/`*_CREDENTIALS`/`*_SOCK`, except the worker CLI's own credentials, the
-  non-secret Bedrock/Vertex settings and the owner's `keep_env`; `HOME` is kept, so file-based credentials under it stay reachable).
+  run with an allowlisted environment (only `PATH`, `HOME`, `USER`, `LOGNAME`, `SHELL`, `LANG`,
+  `LC_*`, `TERM`, `TMPDIR`, `TZ`, the worker CLI's own credentials, the non-secret Bedrock/Vertex
+  settings and the owner's `keep_env`, never the board's `token_env`; `keep_env` may not name
+  the driver's secrets, `*_PAT`, `*PWD`, `*PASSWD`, `NPM_TOKEN` or a database URL, nor a variable
+  holding a URL with credentials; `HOME` is kept, so file-based credentials under it stay reachable).
   Swap-equivalence: corpus
   `000_bootstrap` driven through the bootstrap backend with a fake claude yields the same
   action sequence as through the fake control server. The bootstrap backend is frozen after

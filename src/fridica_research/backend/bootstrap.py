@@ -26,8 +26,8 @@ Invariants the tests assert (`tests/test_bootstrap_backend.py`):
   bounds a job, and the per-study ceiling (0 = none) covers the finished jobs' `total_cost_usd`
   plus a `max_budget_usd_per_job` reservation for every job still in flight, checked inside the
   journal lock (a delegate past it is refused); a launched job that did not finish with a parsed
-  result and whose output carries no cost (timeout, stop, signal, crash, truncated output) is
-  charged its full reservation; a retry never launches while a live orphan of its ActionId runs; each worker's process group id, leader start time and absolute
+  result and whose output carries no usable cost (timeout, stop, signal, crash, truncated output,
+  a NaN or negative cost, a runner exception after the worker process was spawned) is charged its full reservation; a retry never launches while a live orphan of its ActionId runs; each worker's process group id, leader start time and absolute
   deadline are kept in `runs/<ActionId key>-a<attempt>.json`, and a restarted backend kills the
   overdue groups of jobs that never reported, while the leader still has that start time; a
   study's worktrees are removed when it reaches a terminal stage (a worktree with a job still
@@ -53,6 +53,7 @@ import fcntl
 import hashlib
 import json
 import logging
+import math
 import os
 import queue
 import re
@@ -110,10 +111,20 @@ def process_start(pid: int) -> str | None:
     return p.stdout.strip() or None
 
 
+def reported_cost(out) -> float | None:
+    """The `total_cost_usd` of a parsed claude result object, None when it is missing or not a finite number >= 0 (Python's json
+    reads `NaN`; a NaN or negative cost would make `spent` NaN or lower and turn the ceiling off): an unknown cost is charged the reservation."""
+    v = out.get("total_cost_usd") if isinstance(out, dict) else None
+    if v is None or isinstance(v, bool): return None
+    try: f = float(v)
+    except (TypeError, ValueError): return None
+    return f if math.isfinite(f) and f >= 0 else None
+
+
 def cost_known(stdout: str) -> bool:
-    """Whether the worker's output carries a `total_cost_usd` at all (a killed `claude -p` prints nothing)."""
-    try: return (json.loads(stdout) or {}).get("total_cost_usd") is not None
-    except (ValueError, AttributeError, TypeError): return False
+    """Whether the worker's output carries a usable `total_cost_usd` at all (a killed `claude -p` prints nothing)."""
+    try: return reported_cost(json.loads(stdout)) is not None
+    except (ValueError, TypeError): return False
 
 
 def write_redacted(path: Path, text: str):
@@ -237,7 +248,8 @@ class ProcessRunner:
     def __call__(self, argv: list[str], cwd: str, timeout: float) -> tuple[str, int | None]:
         key = tuple(argv)
         with self._lock:
-            p = subprocess.Popen(argv, cwd=cwd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, start_new_session=True, env=self.env)
+            # errors="replace": a worker that ran and wrote invalid UTF-8 (a truncated multibyte character, a stray byte on stderr) is still read
+            p = subprocess.Popen(argv, cwd=cwd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, errors="replace", start_new_session=True, env=self.env)
             self.procs[key] = p
             if key in self.killed: self.killpg(p)
         if self.on_spawn:
@@ -335,6 +347,7 @@ class BootstrapBackend:
         """ProcessRunner's start notice: the worker's process group and absolute deadline, durable for a restarted driver."""
         job = next((j for j in list(self.jobs.values()) if j.get("argv") == argv), None)
         if job is None: return
+        job["spawned"] = True  # the worker process exists: a runner exception from here on is a failed job, not a launch error
         run = {"job_id": job["job_id"], "action_id": job["action_id"], "attempt": job["attempt"], "pgid": pgid, "start": self.proc_start(pgid), "deadline": self.clock() + float(job["timeout"])}
         write_redacted(self.dir / "runs" / f"{run_key(job['action_id'], job['attempt'])}.json", json.dumps(run, sort_keys=True))
 
@@ -526,7 +539,7 @@ class BootstrapBackend:
                 return
             job["launched"] = True
         try: stdout, rc = self.runner(job["argv"], job["cwd"], job["timeout"])
-        except Exception as e:  # noqa: BLE001 - a runner crash is a failed job, not a dead driver
+        except Exception as e:  # noqa: BLE001 - a runner crash is a failed job, not a dead driver (after the spawn: charged, see `outcome`)
             stdout, rc = "", f"runner: {e}"[:200]
         with self._lock:
             job["ran"] = True
@@ -558,8 +571,9 @@ class BootstrapBackend:
 
     def charged(self, job: dict, outcome: dict) -> dict:
         """A launched job that did not finish with a parsed result and whose output carries no cost (timed out, stopped, killed
-        by a signal, crashed, truncated or unparseable output) is charged its full reservation: a killed `claude -p` prints
-        nothing, yet it may have spent up to `max_budget_usd_per_job`. A launch error (`rc` a string) ran nothing and is not."""
+        by a signal, crashed, truncated or unparseable output, a NaN or negative cost, a runner exception after the spawn) is
+        charged its full reservation: a killed `claude -p` prints nothing, yet it may have spent up to `max_budget_usd_per_job`.
+        A launch error (a runner exception before the worker process existed) ran nothing and is not."""
         if outcome["job_status"] != "finished" and not outcome.get("cost_known", True):
             return {**outcome, "total_cost_usd": float(job.get("reserved_usd", self.b.max_budget_usd_per_job)), "cost_known": True}
         return outcome
@@ -568,7 +582,7 @@ class BootstrapBackend:
         """The worker's exit -> job_status, code, WorkerResult (machine_state from the worktree, not the model) and cost."""
         base = {"session_id": job["session_id"], "total_cost_usd": 0.0, "result": None, "code": None}
         if rc is None: return {**base, "job_status": "interrupted", "code": "timeout", "total_cost_usd": cost_of(stdout), "cost_known": cost_known(stdout)}  # killed: whatever cost it reported
-        if isinstance(rc, str): return {**base, "job_status": "failed", "code": rc, "cost_known": True}  # not launched: nothing spent
+        if isinstance(rc, str): return {**base, "job_status": "failed", "code": rc, "cost_known": not job.get("spawned")}  # a runner exception: before the spawn nothing ran ($0); after it, the reservation
         if rc: return {**base, "job_status": "failed", "code": f"exit {rc}", "total_cost_usd": cost_of(stdout), "cost_known": cost_known(stdout)}
         payload, cost, code, known = None, 0.0, None, False
         if self.b.worker == "codex":
@@ -578,8 +592,8 @@ class BootstrapBackend:
         else:
             try:
                 out = json.loads(stdout)
-                cost = float(out.get("total_cost_usd") or 0.0)
-                known = out.get("total_cost_usd") is not None
+                reported = reported_cost(out)
+                cost, known = reported or 0.0, reported is not None
                 base["session_id"] = out.get("session_id") or base["session_id"]
                 if out.get("is_error"): code = "is_error"
                 payload = out.get("structured_output")
@@ -621,8 +635,8 @@ class BootstrapBackend:
 
 def cost_of(stdout: str) -> float:
     """`total_cost_usd` of a claude result object when the output parses at all (a failed job still cost money)."""
-    try: return float((json.loads(stdout) or {}).get("total_cost_usd") or 0.0)
-    except (ValueError, AttributeError, TypeError): return 0.0
+    try: return reported_cost(json.loads(stdout)) or 0.0
+    except (ValueError, TypeError): return 0.0
 
 
 def machine_state(cwd: str) -> dict:

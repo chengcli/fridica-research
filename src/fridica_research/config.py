@@ -118,8 +118,12 @@ class Config:
         d["board"] = Board(**d.get("board", {}))
         b = dict(d.get("backend") or {})
         bs = dict(b.get("bootstrap") or {})
-        if "keep_env" in bs: bs["keep_env"] = tuple(bs["keep_env"])
-        d["backend"] = Backend(str(b.get("kind", "fridica")), Bootstrap(**bs))
+        if "keep_env" in bs:
+            if not isinstance(bs["keep_env"], (list, tuple)): raise ValueError("[backend.bootstrap] keep_env must be a list of environment variable names")
+            bs["keep_env"] = tuple(bs["keep_env"])
+        kind = str(b.get("kind", "fridica"))
+        if kind not in ("fridica", "bootstrap"): raise ValueError(f"[backend] kind must be fridica or bootstrap, not {kind!r}")
+        d["backend"] = Backend(kind, check_bootstrap(Bootstrap(**bs), d["board"].token_env))  # the replay path gets the same checks as `parse`
         d["reviewers"] = tuple(Reviewer(**r) for r in d.get("reviewers", ()))
         for k in ("channels", "starters", "audit_scopes"): d[k] = tuple(d.get(k, ()))
         return cls(**d)
@@ -148,31 +152,59 @@ def parse(text: str) -> Config:
         board=Board(bool(b.get("enabled", False)), str(b.get("owner", "")), int(b.get("number", 0)), str(b.get("repo", "")), str(b.get("token_env", "GH_TOKEN")), str(b.get("owner_type", "user"))),
         reviewers=reviewers, audit_scopes=scopes, require_signoffs=bool(a.get("require_signoffs", True)),
         people={str(k): str(v) for k, v in raw.get("people", {}).items()}, llm_model=str(raw.get("llm_model", "haiku")),
-        backend=_backend(raw.get("backend", {})),
+        backend=_backend(raw.get("backend", {}), str(b.get("token_env", "GH_TOKEN"))),
     )
 
 
-def _backend(b: dict) -> Backend:
+def _backend(b: dict, token_env: str = "GH_TOKEN") -> Backend:
     kind = str(b.get("kind", "fridica"))
     if kind not in ("fridica", "bootstrap"): raise ValueError(f"[backend] kind must be fridica or bootstrap, not {kind!r}")
     bs = b.get("bootstrap", {})
     if str(bs.get("worker", "claude")) not in ("claude", "codex"): raise ValueError("[backend.bootstrap] worker must be claude or codex")
-    if str(bs.get("worker", "claude")) == "codex" and ("max_cost_usd_per_study" not in bs or float(bs["max_cost_usd_per_study"]) != 0):
-        raise ValueError("[backend.bootstrap] worker = \"codex\" needs max_cost_usd_per_study = 0 (no ceiling), stated explicitly: codex reports no cost, so a ceiling would never trip; or use worker = \"claude\"")
+    if str(bs.get("worker", "claude")) == "codex" and "max_cost_usd_per_study" not in bs:
+        raise ValueError(CODEX_CEILING)
     d = Bootstrap()
-    budgets = {k: float(bs.get(k, getattr(d, k))) for k in ("max_budget_usd_per_job", "max_cost_usd_per_study")}
-    for k, v in budgets.items():  # nan, inf or a negative value would turn the ceiling check off silently; 0 = no ceiling
-        if not math.isfinite(v) or v < 0: raise ValueError(f"[backend.bootstrap] {k} must be a finite number >= 0 (0 = no ceiling for max_cost_usd_per_study), not {v}")
+    budgets = {k: _budget(k, bs.get(k, getattr(d, k))) for k in ("max_budget_usd_per_job", "max_cost_usd_per_study")}
+    if isinstance(bs.get("retry_backoff"), bool): raise ValueError("[backend.bootstrap] retry_backoff must be a duration, not a boolean")
     keep_env = bs.get("keep_env", [])
-    if not isinstance(keep_env, list) or not all(isinstance(k, str) for k in keep_env): raise ValueError("[backend.bootstrap] keep_env must be a list of environment variable names")
-    return Backend(kind, Bootstrap(
+    if not isinstance(keep_env, list): raise ValueError("[backend.bootstrap] keep_env must be a list of environment variable names")
+    return Backend(kind, check_bootstrap(Bootstrap(
         journal_dir=str(bs.get("journal_dir", d.journal_dir)), worktrees_dir=str(bs.get("worktrees_dir", "")), worker=str(bs.get("worker", "claude")),
         models={str(k): str(v) for k, v in bs.get("models", {}).items()}, efforts={str(k): str(v) for k, v in bs.get("efforts", {}).items()},
         max_budget_usd_per_job=budgets["max_budget_usd_per_job"], max_cost_usd_per_study=budgets["max_cost_usd_per_study"],
         subject_repo=str(bs.get("subject_repo", "")), subject_revision=str(bs.get("subject_revision", "HEAD")), workspace=str(bs.get("workspace", d.workspace)),
         permission_mode=str(bs.get("permission_mode", d.permission_mode)), roles_dir=str(bs.get("roles_dir", "")), retry_backoff=duration(bs.get("retry_backoff"), d.retry_backoff),
         keep_env=tuple(keep_env),
-    ))
+    ), token_env))
+
+
+CODEX_CEILING = "[backend.bootstrap] worker = \"codex\" needs max_cost_usd_per_study = 0 (no ceiling), stated explicitly: codex reports no cost, so a ceiling would never trip; or use worker = \"claude\""
+# Names `keep_env` may not bring back into a worker's environment: the board's token_env and these (the driver's own secrets).
+KEEP_ENV_FORBIDDEN = re.compile(r"^(FRIDICA_.*|SLACK_.*|GH_TOKEN|GITHUB_TOKEN|.*_SECRET.*)$")
+
+
+def _budget(k: str, v) -> float:
+    """A budget in USD: a finite number >= 0 (nan, inf or a negative value would turn the ceiling check off silently; a boolean is not a number)."""
+    if isinstance(v, bool): raise ValueError(f"[backend.bootstrap] {k} must be a number, not a boolean ({v})")
+    try: f = float(v)
+    except (TypeError, ValueError): raise ValueError(f"[backend.bootstrap] {k} must be a number, not {v!r}") from None
+    if not math.isfinite(f) or f < 0: raise ValueError(f"[backend.bootstrap] {k} must be a finite number >= 0 (0 = no ceiling for max_cost_usd_per_study), not {f}")
+    return f
+
+
+def check_bootstrap(bs: Bootstrap, token_env: str) -> Bootstrap:
+    """The `[backend.bootstrap]` rules, for `parse` and for `Config.from_dict` (the replay path) alike."""
+    for k in ("max_budget_usd_per_job", "max_cost_usd_per_study"): _budget(k, getattr(bs, k))
+    if isinstance(bs.retry_backoff, bool) or not isinstance(bs.retry_backoff, (int, float)) or not math.isfinite(bs.retry_backoff) or bs.retry_backoff < 0:
+        raise ValueError(f"[backend.bootstrap] retry_backoff must be a finite duration >= 0, not {bs.retry_backoff!r}")
+    if bs.worker not in ("claude", "codex"): raise ValueError("[backend.bootstrap] worker must be claude or codex")
+    if bs.worker == "codex" and float(bs.max_cost_usd_per_study) != 0: raise ValueError(CODEX_CEILING)
+    if float(bs.max_cost_usd_per_study) > 0 and float(bs.max_budget_usd_per_job) <= 0:  # the reservation and the charge of a costless failed job would be $0
+        raise ValueError(f"[backend.bootstrap] max_budget_usd_per_job must be > 0 when max_cost_usd_per_study is set ({bs.max_cost_usd_per_study:g}), not {bs.max_budget_usd_per_job:g}")
+    if not all(isinstance(k, str) for k in bs.keep_env): raise ValueError("[backend.bootstrap] keep_env must be a list of environment variable names")
+    bad = [k for k in bs.keep_env if k == token_env or KEEP_ENV_FORBIDDEN.match(k)]
+    if bad: raise ValueError(f"[backend.bootstrap] keep_env may not keep the board token or the driver's secrets: {', '.join(bad)}")
+    return bs
 
 
 def _reviewer(r) -> Reviewer:

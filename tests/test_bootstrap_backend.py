@@ -18,7 +18,7 @@ import pytest
 
 from fridica_research import cli, config, contracts, replay
 from fridica_research.backend import build_backend
-from fridica_research.backend.bootstrap import NAMESPACE, REDACT, action_key, BootstrapBackend, Journal, ProcessRunner, next_ts, worker_env
+from fridica_research.backend.bootstrap import NAMESPACE, REDACT, action_key, BootstrapBackend, Journal, ProcessRunner, next_ts, process_start, run_key, worker_env
 from fridica_research.backend.fridica import FridicaBackend
 from fridica_research.backend.protocol import ControlError, Unavailable
 from fridica_research.client import Client
@@ -818,37 +818,66 @@ def test_an_orphaned_retry_is_not_answered_by_the_first_attempts_result(tmp_path
         b1.join(10)
 
 
-def test_a_same_action_id_retry_does_not_overwrite_the_orphans_process_group(tmp_path):
+def wait_for(cond, seconds: float = 10.0) -> bool:
+    deadline = time.monotonic() + seconds
+    while not cond() and time.monotonic() < deadline: time.sleep(0.01)
+    return cond()
+
+
+@pytest.mark.parametrize("ps", ["real", "stand-in"])
+def test_a_same_action_id_retry_does_not_overwrite_the_orphans_process_group(tmp_path, ps):
+    """Attempt 2 of an ActionId waits for attempt 1's live orphan (L4), launches once that orphan is gone, and keeps its own run
+    file: a later restart kills neither the wrong group nor attempt 2's before its own deadline. Deterministic: every step waits
+    for the state it needs. With the `ps` stand-in the orphan is reported alive even after its kill (a zombie that `ps` still
+    lists), so the retry is seen to wait on the liveness check, not on timing; it launches once `ps` reports it gone."""
     cfg = bootstrap_cfg(tmp_path, dataclasses.replace(CFG, projection={**CFG.projection, "explore": 100}))
-    gate, procs, aid = threading.Event(), [], "t/g1/i1/Explore/a1/explorer"
+    gate, procs, aid, starts = threading.Event(), [], "t/g1/i1/Explore/a1/explorer", {}
+    proc_start = (lambda pid: starts.get(int(pid))) if ps == "stand-in" else process_start
     def spawning(backend):
         def runner(argv, cwd, timeout):
             p = subprocess.Popen(["sh", "-c", "sleep 30 & sleep 30"], start_new_session=True)
+            starts[p.pid] = f"started {p.pid}"
             procs.append(p)
             backend._spawned(argv, p.pid)
             gate.wait(20)
             return "", None
         return runner
-    b1 = BootstrapBackend(cfg, clock=Clock(1000.0), sleep=lambda s: None, runner=lambda a, c, t: ("", None))
-    b1.runner = spawning(b1)
+    def backend_at(t, spawn=False):
+        b = BootstrapBackend(cfg, clock=Clock(t), sleep=lambda s: time.sleep(0.01), runner=lambda a, c, t: ("", None), proc_start=proc_start)
+        if spawn: b.runner = spawning(b)
+        return b
+    runs = Path(cfg.backend.bootstrap.journal_dir) / "runs"
+    b1 = backend_at(1000.0, spawn=True)
     b1.delegate("journal:C1:1.000000", explorer_req(aid))  # attempt 1: deadline 1200; the driver dies
-    b2 = BootstrapBackend(cfg, clock=Clock(1100.0), sleep=lambda s: None, runner=lambda a, c, t: ("", None))
-    b2.runner = spawning(b2)
-    b2.delegate("journal:C1:1.000000", explorer_req(aid))  # attempt 2 of the same ActionId: deadline 1300; this driver dies too
-    deadline = time.monotonic() + 10
-    while len(procs) < 2 and time.monotonic() < deadline: time.sleep(0.01)
-    time.sleep(0.1)
+    assert wait_for(lambda: (runs / f"{run_key(aid, 1)}.json").exists())
+    b2 = None
     try:
-        BootstrapBackend(cfg, clock=Clock(1250.0), sleep=lambda s: None, runner=lambda a, c, t: ("", None))
-        assert procs[0].wait(5) == -9  # attempt 1's group: past its deadline
-        assert procs[1].poll() is None  # attempt 2's: not yet
+        b2 = backend_at(1100.0, spawn=True)
+        b2.delegate("journal:C1:1.000000", explorer_req(aid))  # attempt 2 of the same ActionId: deadline 1300 once launched; this driver dies too
+        time.sleep(0.2)
+        assert len(procs) == 1 and not b2.jobs["job-2"]["launched"]  # waits for the live orphan
+        if ps == "real":
+            backend_at(1250.0)  # a restart past attempt 1's deadline kills its group
+            assert procs[0].wait(5) == -9 and not (runs / f"{run_key(aid, 1)}.json").exists()
+        else:
+            os.killpg(procs[0].pid, 9)  # the orphan's group is gone, but `ps` still reports its leader alive
+            assert procs[0].wait(5) == -9
+            time.sleep(0.2)
+            assert len(procs) == 1 and not b2.jobs["job-2"]["launched"]  # so the retry still waits
+            starts.pop(procs[0].pid)  # now `ps` reports it gone
+        assert wait_for(lambda: len(procs) == 2 and (runs / f"{run_key(aid, 2)}.json").exists())  # the retry launched once the orphan was gone
+        run2 = json.loads((runs / f"{run_key(aid, 2)}.json").read_text())
+        assert run2["pgid"] == procs[1].pid and run2["deadline"] == 1300.0 and run2["attempt"] == 2
+        b4 = backend_at(1250.0)  # another restart, before attempt 2's deadline: its group and run file stay
+        assert b4.jobs["job-2"]["orphan"] and procs[1].poll() is None and (runs / f"{run_key(aid, 2)}.json").exists()
     finally:
         for p in procs:
             try: os.killpg(p.pid, 9)
-            except ProcessLookupError: pass
+            except (ProcessLookupError, PermissionError): pass
+            p.wait(5)
         gate.set()
         b1.join(10)
-        b2.join(10)
+        if b2: b2.join(10)
 
 
 def test_codex_needs_an_explicit_zero_ceiling():
@@ -1038,3 +1067,89 @@ def test_a_retry_waiting_for_a_live_orphan_can_be_stopped(tmp_path):
         assert not launched and [(x["attempt"], x["code"]) for x in jr] == [(2, "stopped")] and procs[0].poll() is None
     finally:
         cleanup()
+
+
+# -- review fixes (iteration 3e): each behavioural one fails on 0c005ba ---------------------------------
+FAKE_CLAUDE = {  # a worker that ran, reported its cost, and wrote invalid UTF-8
+    "stderr-0xff": "printf '%s' '{\"type\":\"result\",\"total_cost_usd\":3.0,\"is_error\":true}'\nprintf '\\377' >&2\n",
+    "stdout-truncated-multibyte": "printf '%s' '{\"type\":\"result\",\"total_cost_usd\":3.0,\"is_error\":true,\"result\":\"'\nprintf '\\342\\202'\nprintf '\"}'\n",
+}
+
+
+@pytest.mark.parametrize("script", list(FAKE_CLAUDE), ids=list(FAKE_CLAUDE))
+def test_a_worker_that_wrote_invalid_utf8_is_charged_not_a_launch_error(tmp_path, monkeypatch, script):
+    """M1: the default ProcessRunner reads invalid UTF-8 with replacement, so the reported cost (3.0) is charged; with ceiling 5 and
+    5 per job the second delegate is refused (on 0c005ba the decode error was a launch error at $0 and the reservation was released)."""
+    bin_ = tmp_path / "bin"
+    bin_.mkdir()
+    (bin_ / "claude").write_text("#!/bin/sh\n" + FAKE_CLAUDE[script])
+    (bin_ / "claude").chmod(0o755)
+    monkeypatch.setenv("PATH", f"{bin_}{os.pathsep}{os.environ['PATH']}")
+    backend = BootstrapBackend(bootstrap_cfg(tmp_path, max_budget_usd_per_job=5.0, max_cost_usd_per_study=5.0), sleep=lambda s: None)  # the default runner
+    explore(backend, 1)
+    with pytest.raises(ControlError) as e: explore(backend, 2)
+    assert (e.value.status, e.value.code) == (429, "budget_exceeded")
+    jr = [r for r in backend.journal.all() if r["kind"] == "job_result"]
+    assert [(r["job_status"], r["code"], r["total_cost_usd"]) for r in jr] == [("failed", "is_error", 3.0)] and (backend.spent(), backend.reserved()) == (3.0, 0.0)
+
+
+def test_a_runner_exception_after_the_spawn_is_charged_its_reservation(tmp_path):
+    """M1: an exception raised after on_spawn (the worker process exists) is a failed job charged its full reservation; one raised
+    before the spawn stays a launch error at $0 (test_a_failed_job_with_a_reported_cost_and_a_launch_error_are_not_charged_the_reservation)."""
+    holder = {}
+    def runner(argv, cwd, timeout):
+        holder["b"]._spawned(argv, os.getpid())
+        raise UnicodeDecodeError("utf-8", b"\xff", 0, 1, "invalid start byte")
+    backend = BootstrapBackend(bootstrap_cfg(tmp_path, max_budget_usd_per_job=5.0, max_cost_usd_per_study=5.0), runner=runner, sleep=lambda s: None, proc_start=lambda pid: None)
+    holder["b"] = backend
+    explore(backend, 1)
+    with pytest.raises(ControlError) as e: explore(backend, 2)
+    assert (e.value.status, e.value.code) == (429, "budget_exceeded")
+    jr = [r for r in backend.journal.all() if r["kind"] == "job_result"]
+    assert len(jr) == 1 and jr[0]["job_status"] == "failed" and jr[0]["code"].startswith("runner: ") and jr[0]["total_cost_usd"] == 5.0
+    assert not list((Path(backend.dir) / "runs").iterdir())
+
+
+def test_a_zero_per_job_budget_with_a_ceiling_is_a_config_error():
+    """M2: max_budget_usd_per_job = 0 with a positive ceiling makes the reservation and the B1 charge $0."""
+    with pytest.raises(ValueError, match="max_budget_usd_per_job must be > 0"):
+        config.parse('[backend]\nkind = "bootstrap"\n[backend.bootstrap]\nmax_budget_usd_per_job = 0\nmax_cost_usd_per_study = 20\n')
+    c = config.parse('[backend]\nkind = "bootstrap"\n[backend.bootstrap]\nworker = "codex"\nmax_budget_usd_per_job = 0\nmax_cost_usd_per_study = 0\n')  # no ceiling: allowed
+    assert c.backend.bootstrap.max_budget_usd_per_job == 0
+
+
+@pytest.mark.parametrize("name", ["GH_TOKEN", "GITHUB_TOKEN", "BOARD_PAT", "FRIDICA_CAPABILITY", "SLACK_BOT_TOKEN", "DB_SECRET", "AWS_SECRET_ACCESS_KEY", "MY_SECRET_THING"])
+def test_keep_env_may_not_keep_the_board_token_or_the_drivers_secrets(name):
+    """L1: keep_env rejects the board's token_env and FRIDICA_*, SLACK_*, GH_TOKEN, GITHUB_TOKEN, *_SECRET*."""
+    with pytest.raises(ValueError, match="keep_env may not keep"):
+        config.parse(f'[board]\ntoken_env = "BOARD_PAT"\n[backend]\nkind = "bootstrap"\n[backend.bootstrap]\nkeep_env = ["MY_PROXY_TOKEN", "{name}"]\n')
+    assert config.parse('[board]\ntoken_env = "BOARD_PAT"\n[backend.bootstrap]\nkeep_env = ["MY_PROXY_TOKEN"]\n').backend.bootstrap.keep_env == ("MY_PROXY_TOKEN",)
+
+
+@pytest.mark.parametrize("cost", ["NaN", "-1.0", "Infinity"])
+def test_a_nan_or_negative_cost_is_unknown_and_charged_the_reservation(tmp_path, cost):
+    """L2: Python's json reads NaN; a NaN, infinite or negative cost would turn the ceiling off, so it is charged the reservation."""
+    out = f'{{"type":"result","is_error":true,"total_cost_usd":{cost}}}'
+    backend = BootstrapBackend(bootstrap_cfg(tmp_path, max_budget_usd_per_job=5.0, max_cost_usd_per_study=5.0), runner=lambda a, c, t: (out, 0), sleep=lambda s: None)
+    explore(backend, 1)
+    with pytest.raises(ControlError) as e: explore(backend, 2)
+    assert (e.value.status, e.value.code) == (429, "budget_exceeded")
+    jr = [r for r in backend.journal.all() if r["kind"] == "job_result"]
+    assert [(r["code"], r["total_cost_usd"]) for r in jr] == [("is_error", 5.0)] and backend.spent() == 5.0
+
+
+@pytest.mark.parametrize("bad", [{"max_cost_usd_per_study": float("nan")}, {"max_cost_usd_per_study": -1.0}, {"max_budget_usd_per_job": 0.0},
+                                 {"max_budget_usd_per_job": True}, {"max_cost_usd_per_study": True}, {"retry_backoff": True}, {"worker": "codex"},
+                                 {"keep_env": ["GH_TOKEN"]}, {"worker": "gemini"}], ids=lambda d: f"{next(iter(d))}={next(iter(d.values()))}")
+def test_from_dict_runs_the_same_checks_as_parse(bad):
+    """L3: the replay path (Config.from_dict) validates like parse, and a boolean is not a number there or in TOML."""
+    d = json.loads(json.dumps(config.parse('[backend]\nkind = "bootstrap"\n').to_dict()))
+    assert config.Config.from_dict(d) == config.parse('[backend]\nkind = "bootstrap"\n')
+    d["backend"]["bootstrap"].update(bad)
+    with pytest.raises(ValueError): config.Config.from_dict(json.loads(json.dumps(d)))
+
+
+@pytest.mark.parametrize("key", ["max_budget_usd_per_job", "max_cost_usd_per_study", "retry_backoff"])
+def test_a_boolean_for_a_numeric_bootstrap_field_is_a_config_error(key):
+    with pytest.raises(ValueError, match="boolean"):
+        config.parse(f'[backend]\nkind = "bootstrap"\n[backend.bootstrap]\n{key} = true\n')

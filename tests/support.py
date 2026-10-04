@@ -72,13 +72,14 @@ class World:
             if a.kind == "llm_call":
                 self.ev("llm_result", action_id=a.id, ok=True, payload=self.llm(a["name"], a["prompt"]))
             elif a.kind == "delegate" and self.auto_delegate:
+                lane = a.get("lens") or a["role"]
                 if self.refuse_delegate:
                     self.ev("delegate_refused", action_id=a.id, code=self.refuse_delegate.pop(0), status=409, role=a["role"])
                     continue
                 self.jobs += 1
-                wid = a.get("worker_id") or self.workers.get(a["role"]) or f"w-{a['role']}-{self.jobs}"
-                self.workers[a["role"]] = wid
-                self.pending[a["role"]] = f"job-{self.jobs}"
+                wid = a.get("worker_id") or self.workers.get(lane) or f"w-{lane}-{self.jobs}"
+                self.workers[lane] = wid
+                self.pending[lane] = f"job-{self.jobs}"
                 self.ev("delegated", action_id=a.id, join_group=f"grp-{a.id}", jobs=[{"job_id": f"job-{self.jobs}", "worker_id": wid, "role": a["role"]}])
             elif a.kind == "post" and self.auto_post and a["post_kind"] not in self.hold:
                 self.ev("own_post_seen", ts=self.next_ts(), kind=a["post_kind"], text=a["text"])

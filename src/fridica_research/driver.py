@@ -126,7 +126,7 @@ class Driver:
         now = self.clock()
         try:
             if a.kind == "delegate":
-                body = {k: v for k, v in a.data.items() if k not in ("thread", "action_id")}
+                body = {k: v for k, v in a.data.items() if k not in ("thread", "action_id", "lens")}
                 r = self.client.delegate(state.thread, body)
                 jobs = r.get("jobs") or []
                 return [Event("delegated", now, {"action_id": a.id, "join_group": r.get("join_group", ""), "jobs": jobs})]
@@ -183,9 +183,9 @@ class Driver:
                 prompt = {"study_brief": lambda: briefs.prompt_brief(s.problem, s.iteration, s.findings, s.peer_claims), "study_synthesis": lambda: briefs.prompt_synthesis(s.problem, s.approach(), s.explorer_report, s.reports), "study_deliver": lambda: briefs.prompt_deliver(s.problem, s.approach(), s.synthesis.get("synthesis", ""), s.implementer.get("summary", ""), s.audit.get("summary", ""), s.findings, s.partial)}[name]()
                 self.apply(s.thread, self.run_llm(w["id"], name, prompt))
             elif w["kind"] in ("group", "slot"):
-                known = {j["role"] for j in s.group["jobs"].values()}
+                known = {j.get("action_id") for j in s.group["jobs"].values()}
                 for a in w["actions"]:
-                    if a["role"] in known: continue
+                    if a["action_id"] in known: continue
                     jobs = view.jobs_with_ref(a["action_id"])
                     if not jobs:
                         for ev in self.execute(s, Action("delegate", a["action_id"], a)): self.apply(s.thread, ev)

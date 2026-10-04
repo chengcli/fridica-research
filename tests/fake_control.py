@@ -86,7 +86,7 @@ class FakeControl:
         self.push(e)
 
     def job_of(self, thread: str, role: str, nth: int = -1) -> dict:
-        return [j for j in self.view(thread)["jobs"] if j["role"] == role][nth]
+        return [j for j in self.view(thread)["jobs"] if j["role"] == role or (j["role"] == "debater" and f"# {role.title()}" in j.get("instructions", ""))][nth]
 
     # -- routing ---------------------------------------------------------------
     def handle(self, h: BaseHTTPRequestHandler, method: str):
@@ -143,7 +143,7 @@ class FakeControl:
         jid = f"job-{self.jobs}"
         wid = body.get("worker_id") or f"w-{self.jobs}"
         group = f"grp-{self.jobs}"
-        self.view(thread)["jobs"].append({"id": jid, "worker_id": wid, "role": body["role"], "brief": body["brief"], "tags": body.get("tags", []), "job_status": "running", "result": None, "error": None, "inbox_id": group, "attempt": 1})
+        self.view(thread)["jobs"].append({"id": jid, "worker_id": wid, "role": body["role"], "brief": body["brief"], "instructions": body.get("instructions", ""), "tags": body.get("tags", []), "job_status": "running", "result": None, "error": None, "inbox_id": group, "attempt": 1})
         self.push({"kind": "job", **self.place(thread), "action": "started", "job_id": jid, "attempt": 1, "worker_id": wid, "machine": "m", "workspace": "w", "backend": "claude"})
         return 200, {"join_group": group, "jobs": [{"job_id": jid, "worker_id": wid, "role": body["role"]}]}
 

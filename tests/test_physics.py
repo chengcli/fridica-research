@@ -80,7 +80,7 @@ def test_claim_ordering_peer_before_echo_we_win():
     w.ev("own_post_seen", ts="1700000000.000800", kind="study_claim", text=post["text"])  # T0 < T1
     assert w.state.claim["slug"] == "alpha" and w.state.claim["status"] == "settling"
     w.tick(w.cfg.settle_window)
-    assert w.state.stage == "Debate" and [a["role"] for a in w.kinds("delegate")] == ["explorer", "mathematician", "physicist"]
+    assert w.state.stage == "Debate" and [a["role"] for a in w.kinds("delegate")] == ["explorer", "debater", "debater"]
 
 
 def test_claim_ordering_peer_earlier_we_repick_and_delegate_nothing_in_between():
@@ -94,7 +94,7 @@ def test_claim_ordering_peer_earlier_we_repick_and_delegate_nothing_in_between()
     assert [a["role"] for a in w.kinds("delegate")] == ["explorer"]
     w.ev("own_post_seen", ts="1700000000.000900", kind="study_claim", text=claims[1]["text"])
     w.tick(w.cfg.settle_window)
-    assert w.state.stage == "Debate" and len([a for a in w.kinds("delegate") if a["role"] == "mathematician"]) == 1
+    assert w.state.stage == "Debate" and len([a for a in w.kinds("delegate") if a.get("lens") == "mathematician"]) == 1
 
 
 def test_claim_ordering_echo_then_peer_earlier_during_settle():
@@ -136,8 +136,8 @@ def test_slot_refusal_waits_for_interrupted_and_retries_same_request(world):
     s = drv.store.load(thread)
     assert s.stage == "Debate" and s.phase == "slot" and s.attempt == 1
     refused = [r for r in server.requests if r[1].endswith("/delegate")][-2:]
-    assert [r[2]["role"] for r in refused] == ["mathematician", "physicist"]  # one refused, one accepted
-    accepted = {r[2]["role"] for r in refused} - {s.waiting["refused"]}
+    assert [r[2]["role"] for r in refused] == ["debater", "debater"]  # one refused, one accepted
+    accepted = {r[2]["tags"][0] for r in refused} - {s.waiting["refused"]}
     assert len(accepted) == 1
     # An unrelated worker's job is interrupted: the slot frees.
     server.view(thread)["jobs"].append({"id": "job-old", "worker_id": "w-old", "role": "implementer", "brief": "", "tags": [], "job_status": "running", "result": None, "error": None, "inbox_id": "g0", "attempt": 1})
@@ -146,8 +146,8 @@ def test_slot_refusal_waits_for_interrupted_and_retries_same_request(world):
     s = drv.store.load(thread)
     assert s.phase == "job" and s.attempt == 1 and not s.notes
     sent = [r[2] for r in server.requests if r[1].endswith("/delegate")]
-    assert sent[-1] == next(r[2] for r in refused if r[2]["role"] == s.waiting["refused"])  # byte-identical re-send
-    assert {j["role"] for j in server.view(thread)["jobs"] if j["job_status"] == "running"} == {"mathematician", "physicist"}
+    assert sent[-1] == refused[0][2]  # byte-identical re-send
+    assert [j["role"] for j in server.view(thread)["jobs"] if j["job_status"] == "running"].count("debater") == 2
 
 
 def test_other_4xx_on_delegate_is_a_stage_failure():

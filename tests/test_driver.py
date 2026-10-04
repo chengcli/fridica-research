@@ -230,11 +230,11 @@ def test_restart_mid_debate_pair_adopts_existing_jobs_and_resends_only_the_missi
     s.group["jobs"].clear()
     s.group["pending"] = ["mathematician", "physicist"]
     drv.store.save(s)
-    server.view(thread)["jobs"] = [j for j in server.view(thread)["jobs"] if j["role"] != "physicist"]
+    server.view(thread)["jobs"] = [j for j in server.view(thread)["jobs"] if j["id"] != server.job_of(thread, "physicist")["id"]]
     drv2 = make_driver(cfg, store=Store(cfg.state_file))
     drain(drv2)
     s2 = drv2.store.load(thread)
-    roles = sorted(j["role"] for j in server.view(thread)["jobs"] if j["job_status"] == "running")
-    assert roles == ["mathematician", "physicist"] and sorted(j["role"] for j in s2.group["jobs"].values()) == roles
+    assert sorted(j["role"] for j in server.view(thread)["jobs"] if j["job_status"] == "running") == ["debater", "debater"]
+    assert sorted(j["role"] for j in s2.group["jobs"].values()) == ["mathematician", "physicist"]
     assert s2.workers["mathematician"]["worker_id"] == server.job_of(thread, "mathematician")["worker_id"]  # adopted, not re-delegated
     assert s2.phase == "job" and s2.waiting["kind"] == "group"

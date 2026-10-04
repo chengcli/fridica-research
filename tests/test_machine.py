@@ -46,11 +46,11 @@ def test_claim_settles_into_debate_with_persistent_pair():
     w.to_debate()
     assert w.state.stage == "Debate" and w.state.round == 1 and w.state.claim["status"] == "owned"
     roles = [a["role"] for a in w.kinds("delegate")]
-    assert roles == ["explorer", "mathematician", "physicist"]
+    assert roles == ["explorer", "debater", "debater"]
     assert all(a["ephemeral"] is False for a in w.kinds("delegate")[1:])
     for a in w.kinds("delegate")[1:]:
         assert "# Debater" in a["instructions"]
-        assert f"# {a['role'].title()}" in a["instructions"]
+        assert f"# {a['lens'].title()}" in a["instructions"]
         assert "needs contract decision" in a["instructions"]
 
 
@@ -359,7 +359,7 @@ def test_audit_scopes_without_local_auditor_and_peer_changes():
     cfg = dataclasses.replace(CFG, audit_scopes=("scope",), require_signoffs=True)
     w = World(cfg=cfg)
     w.to_audit()
-    assert [a["role"] for a in w.kinds("delegate")] == ["explorer", "mathematician", "physicist", "mathematician", "physicist", "implementer"]
+    assert [a["role"] for a in w.kinds("delegate")] == ["explorer", "debater", "debater", "debater", "debater", "implementer"]
     assert w.state.phase == "signoff" and w.state.audit_scopes == {"scope": {"reviewer": "UREV", "verdict": None, "signed_at": None, "requested": True}}
     w.ev("sign_off", sender="USOMEONE", pr=PR, sha=SHA, verdict="approve")  # not a reviewer: recorded, no effect
     assert w.state.stage == "Audit"

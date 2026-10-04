@@ -12,7 +12,7 @@ from importlib import resources
 
 from . import contracts
 
-ROLES = {"explore": "explorer", "debate": ("mathematician", "physicist"), "implement": "implementer", "audit": "auditor"}
+ROLES = {"explore": "explorer", "debate": "debater", "implement": "implementer", "audit": "auditor"}
 CHARTERS = (
     "fridica-core: general mechanism only; no names, enums, defaults or prompt text specific to one host.",
     "fridica-store-sqlite: storage contract only.",

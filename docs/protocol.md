@@ -106,7 +106,8 @@ hours and Finished on delivery.
 
 Roles are this package's `roles/` catalog (explorer, debater with mathematician and physicist
 lenses, implementer, auditor). Every delegation sends the complete role text as `instructions`;
-the two debate lanes currently retain their lens names as worker identifiers. The host must
+the two debate lanes retain their lens names as research-side worker identifiers while the
+host receives the `debater` role. The host must
 include `instructions` in its instruction fingerprint when resuming a worker (fridica #130).
 Debate = mathematician || physicist, each report ending with a `## Stance` block
 (`position: agree|disagree|revised`, `notes:`); a missing position counts as `disagree`. Rounds

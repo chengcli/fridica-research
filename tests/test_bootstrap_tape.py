@@ -35,7 +35,7 @@ def tape(w: World, sync=lambda: None):
     # Round 1: both revised; round 2: both revised (max reached) -> synthesis.
     w.finish("mathematician", result(report=report(position="revised", body="state space, transition table, invariants")))
     w.finish("physicist", result(report=report(position="revised", body="scales, balances, five tests")))
-    assert w.state.round == 2 and [a["role"] for a in w.kinds("delegate")[-2:]] == ["mathematician", "physicist"]
+    assert w.state.round == 2 and [a["lens"] for a in w.kinds("delegate")[-2:]] == ["mathematician", "physicist"]
     w.now += STAGE_MIN["Debate"] * 60
     w.finish("mathematician", result(report=report(position="revised", body="concede snapshot store; keep waiting ledger")))
     w.finish("physicist", result(report=report(position="revised", body="concede snapshot; hold no log")))
@@ -77,7 +77,7 @@ def test_bootstrap_tape():
     assert "projected: 4 h, actual: 3.27 h" in res and "pr: https://github.com/chengcli/fridica-research/pull/2" in res and "audit: pass" in res
     # Three LLM calls, six delegates (explorer, 2x2 debate, implementer, auditor).
     assert [a["name"] for a in w.kinds("llm_call")] == ["study_brief", "study_synthesis", "study_deliver"]
-    assert [a["role"] for a in w.kinds("delegate")] == ["explorer", "mathematician", "physicist", "mathematician", "physicist", "implementer"]
+    assert [a["role"] for a in w.kinds("delegate")] == ["explorer", "debater", "debater", "debater", "debater", "implementer"]
     # Board (R9, R13): #1 is the study; #2-#5 Explore..Implement; #6-#8 one audit card per reviewer; #9 Deliver. Plain issues, one assignee each.
     cards = json.loads(meta[f"board:{THREAD}"])
     assert cards["issue"] == 1 and [[c["issue"] for c in st["cards"]] for st in cards["stages"]] == [[2], [3], [4], [5], [6, 7, 8], [9]] and cards["closed"]

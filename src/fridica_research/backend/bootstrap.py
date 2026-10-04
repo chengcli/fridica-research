@@ -14,23 +14,31 @@ written by the backend: only a corpus or a test injects them through `Journal.ap
 Invariants the tests assert (`tests/test_bootstrap_backend.py`):
 - single writer: `fcntl.flock` on `journal.lock` around every append, one write of one line,
   contiguous `seq`; a reader stops on a gap (corruption is a stop, not a skip);
-- durable completion: the WorkerResult is written to `results/<ActionId key>.json` before the
-  journal line, so a restarted driver finds a finished job by its `ref:`;
+- durable completion: the WorkerResult is written to `results/<ActionId key>-a<attempt>.json`
+  before the journal line, so a restarted driver finds a finished job by its `ref:` and attempt
+  (an orphaned attempt 2 is never answered by attempt 1's file); the code after the worker
+  returns is guarded, so unreadable output is a failed job (`worker_output_unreadable`), never a
+  dead thread holding its reservation;
 - deterministic sessions: the worker's session id is `uuid5(NAMESPACE, ActionId)`; a re-sent
   delegate for the same ActionId (restart probe, rule R) runs `--resume`, never a duplicate;
 - bounded: the process group is killed at 2x the stage projection (`OVERRUN_FACTOR`), a retry
   of a seen ActionId backs off exponentially (and never launches once stopped), `--max-budget-usd`
-  bounds a job, and the per-study ceiling covers the finished jobs' `total_cost_usd` plus a
-  `max_budget_usd_per_job` reservation for every job still in flight, checked inside the journal
-  lock (a delegate past it is refused); each worker's process group id and absolute deadline are
-  kept in `runs/<ActionId key>.json`, and a restarted backend kills the overdue groups of jobs
-  that never reported; a study's worktrees are removed when it reaches a terminal stage;
+  bounds a job, and the per-study ceiling (0 = none) covers the finished jobs' `total_cost_usd`
+  plus a `max_budget_usd_per_job` reservation for every job still in flight, checked inside the
+  journal lock (a delegate past it is refused); an interrupted job whose output carries no cost
+  is charged its full reservation; each worker's process group id, leader start time and absolute
+  deadline are kept in `runs/<ActionId key>-a<attempt>.json`, and a restarted backend kills the
+  overdue groups of jobs that never reported, while the leader still has that start time; a
+  study's worktrees are removed when it reaches a terminal stage (a worktree with a job still
+  running in it, when that job's result is reaped);
 - redaction-clean: every file the backend writes (journal, `results/`, including codex's
   `--output-last-message` file, `sessions/`, `workers/`, `runs/`) passes `redact`; the brief is
   not kept anywhere but the redacted journal line;
-- scrubbed workers: the worker's environment drops `FRIDICA_*`, `SLACK_*`, `GH_TOKEN`,
-  `GITHUB_TOKEN` and every `*_TOKEN` / `*_SECRET` / `*_API_KEY` except the worker CLI's own
-  credentials (`WORKER_CREDENTIALS`).
+- scrubbed workers: the worker's environment drops the board's `token_env`, `FRIDICA_*`,
+  `SLACK_*`, `AWS_*`, `GH_TOKEN`, `GITHUB_TOKEN`, `DATABASE_URL` and every `*_TOKEN` / `*_SECRET` /
+  `*_KEY` / `*PASSWORD` / `*_PASS` / `*_CREDENTIALS` / `*_SOCK` (so `SSH_AUTH_SOCK`) except the
+  worker CLI's own credentials (`WORKER_CREDENTIALS`); `HOME` is kept, so file-based credentials
+  under it stay reachable.
 
 The runner is pluggable (`runner(argv, cwd, timeout) -> (stdout, returncode)`, `returncode`
 None when killed at the deadline) so tests use a fake claude.
@@ -66,22 +74,38 @@ NAMESPACE = uuid.UUID("6f1c2b0e-5a7d-4f1e-9c3a-2b8d7e6f5a41")  # session id = uu
 FINISHED = ("finished", "failed", "interrupted")
 REDACT = re.compile(
     r"-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----.*?(?:-----END [A-Z0-9 ]*PRIVATE KEY-----|\Z)"  # PEM private key blocks (an unterminated one to the end)
-    r"|sk-[A-Za-z0-9_-]{4,}"  # OpenAI / Anthropic (`sk-ant-...`)
-    r"|(?:ghp|gho|ghs|ghu)_[A-Za-z0-9]{4,}|github_pat_[A-Za-z0-9_]{4,}"  # GitHub
-    r"|xox[bpa]-[A-Za-z0-9-]{4,}|xapp-[A-Za-z0-9-]{4,}"  # Slack
-    r"|Bearer\s+[A-Za-z0-9._~+/=-]{4,}"
+    r"|\bsk-[A-Za-z0-9_-]{4,}"  # OpenAI / Anthropic (`sk-ant-...`); the word boundary keeps "risk-based" intact
+    r"|(?:ghp|gho|ghs|ghu|ghr)_[A-Za-z0-9]{4,}|github_pat_[A-Za-z0-9_]{4,}"  # GitHub
+    r"|xox[abeoprs]-[A-Za-z0-9-]{4,}|xapp-[A-Za-z0-9-]{4,}"  # Slack (bot, user, app, refresh, rotated, ...)
+    r"|(?i:bearer)\s+[A-Za-z0-9._~+/=-]{4,}"
     r"|AKIA[0-9A-Z]{16}",  # AWS access key id
     re.DOTALL)
 BACKOFF_CAP = 8  # retry backoff doubles per retry up to retry_backoff * BACKOFF_CAP
 # What a worker may keep of the driver's environment: the credentials its own CLI authenticates with.
 WORKER_CREDENTIALS = {"claude": ("ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "CLAUDE_CODE_OAUTH_TOKEN"), "codex": ("OPENAI_API_KEY", "CODEX_API_KEY")}
-SECRET_ENV = re.compile(r"^(FRIDICA_.*|SLACK_.*|GH_TOKEN|GITHUB_TOKEN|.*_TOKEN|.*_SECRET|.*_API_KEY)$")
+SECRET_ENV = re.compile(r"^(FRIDICA_.*|SLACK_.*|AWS_.*|GH_TOKEN|GITHUB_TOKEN|DATABASE_URL|.*_TOKEN|.*_SECRET|.*_KEY|.*PASSWORD|.*_PASS|.*_CREDENTIALS|.*_SOCK)$")
 
 
-def worker_env(environ, worker: str) -> dict[str, str]:
-    """The driver's environment without board, Slack, fridica or other secrets; the worker CLI's own credentials stay."""
+def worker_env(environ, worker: str, drop: tuple[str, ...] = ()) -> dict[str, str]:
+    """The driver's environment without board, Slack, fridica, cloud, database or other secrets (and without the
+    variables named in `drop`, e.g. the board's `token_env`); the worker CLI's own credentials stay."""
     keep = WORKER_CREDENTIALS.get(worker, ())
-    return {k: v for k, v in environ.items() if k in keep or not SECRET_ENV.match(k)}
+    return {k: v for k, v in environ.items() if k in keep or (k not in drop and not SECRET_ENV.match(k))}
+
+
+def process_start(pid: int) -> str | None:
+    """The start time of process `pid` (`ps -o lstart=`), None when there is no such process: a recorded pgid is killed
+    only while its leader is still the process the backend spawned."""
+    try: p = subprocess.run(["ps", "-o", "lstart=", "-p", str(int(pid))], capture_output=True, text=True, timeout=10)
+    except (OSError, subprocess.SubprocessError, ValueError): return None
+    if p.returncode: return None
+    return p.stdout.strip() or None
+
+
+def cost_known(stdout: str) -> bool:
+    """Whether the worker's output carries a `total_cost_usd` at all (a killed `claude -p` prints nothing)."""
+    try: return (json.loads(stdout) or {}).get("total_cost_usd") is not None
+    except (ValueError, AttributeError, TypeError): return False
 
 
 def write_redacted(path: Path, text: str):
@@ -109,6 +133,12 @@ def next_ts(last: str | None, now: float) -> str:
 def action_key(action_id: str) -> str:
     """A file name for an ActionId: its last segment and a hash of the whole."""
     return f"{re.sub(r'[^A-Za-z0-9_-]', '_', action_id.rsplit('/', 1)[-1])[:40]}-{hashlib.sha1(action_id.encode()).hexdigest()[:16]}"
+
+
+def run_key(action_id: str, attempt: int) -> str:
+    """A file name for one attempt of an ActionId: `results/` and `runs/` are keyed by both, so an orphaned attempt 2 is never
+    answered by attempt 1's result file and a same-ActionId retry never overwrites an orphan's process group."""
+    return f"{action_key(action_id)}-a{int(attempt)}"
 
 
 def stage_of(action_id: str) -> str | None:
@@ -238,18 +268,19 @@ class ProcessRunner:
 
 
 class BootstrapBackend:
-    def __init__(self, cfg: Config, runner: Runner | None = None, clock=time.time, sleep=time.sleep):
-        self.cfg, self.b, self.clock, self.sleep = cfg, cfg.backend.bootstrap, clock, sleep
+    def __init__(self, cfg: Config, runner: Runner | None = None, clock=time.time, sleep=time.sleep, proc_start: Callable[[int], str | None] = process_start):
+        self.cfg, self.b, self.clock, self.sleep, self.proc_start = cfg, cfg.backend.bootstrap, clock, sleep, proc_start
         self.dir = Path(os.path.expanduser(self.b.journal_dir))
         self.journal = Journal(self.dir)
         self.worktrees = Path(os.path.expanduser(self.b.worktrees_dir)) if self.b.worktrees_dir else self.dir / "worktrees"
         for d in ("results", "sessions", "workers", "runs"): (self.dir / d).mkdir(parents=True, exist_ok=True)
-        self.runner = runner or ProcessRunner(env=worker_env(os.environ, self.b.worker), on_spawn=self._spawned)
+        self.runner = runner or ProcessRunner(env=worker_env(os.environ, self.b.worker, drop=(cfg.board.token_env,)), on_spawn=self._spawned)
         self.done: queue.Queue = queue.Queue()
         self.threads: dict[str, threading.Thread] = {}
         self.jobs: dict[str, dict] = {}  # job_id -> the job line (running, stopped, or an orphan of a crashed driver)
         self.drivers: dict[str, str] = {}
         self._lock = threading.Lock()  # a job's stopped / launched / ran flags (stop() against the worker thread)
+        self.pending_release: set[str] = set()  # worker ids whose worktree release() skipped while a job ran in it
         self._recover()
 
     # -- journal helpers -----------------------------------------------------------
@@ -274,6 +305,7 @@ class BootstrapBackend:
         return round(sum(float(r.get("reserved_usd", self.b.max_budget_usd_per_job)) for r in rows if r.get("kind") == "job" and r["job_id"] not in done), 6)
 
     def _check_budget(self, aid: str, rows: list[dict]):
+        if self.b.max_cost_usd_per_study <= 0: return  # 0: no ceiling (codex, which reports no cost)
         spent, reserved, new = self.spent(rows), self.reserved(rows), self.b.max_budget_usd_per_job
         if spent + reserved + new > self.b.max_cost_usd_per_study:
             log.warning("delegate %s refused: %.2f USD spent, %.2f reserved in flight, %.2f per job, ceiling %.2f", aid, spent, reserved, new, self.b.max_cost_usd_per_study)
@@ -286,7 +318,7 @@ class BootstrapBackend:
         results = {r["job_id"] for r in rows if r.get("kind") == "job_result"}
         for r in rows:
             if r.get("kind") == "job" and r["job_id"] not in results:
-                f = self.dir / "results" / f"{action_key(r['action_id'])}.json"
+                f = self.dir / "results" / f"{run_key(r['action_id'], r['attempt'])}.json"
                 if f.exists(): self._record(r, json.loads(f.read_text()))
                 else: self.jobs[r["job_id"]] = {**r, "stopped": True, "orphan": True}  # no process to adopt; the stage timer retries (rule R)
         self._kill_overdue()
@@ -295,22 +327,29 @@ class BootstrapBackend:
         """ProcessRunner's start notice: the worker's process group and absolute deadline, durable for a restarted driver."""
         job = next((j for j in list(self.jobs.values()) if j.get("argv") == argv), None)
         if job is None: return
-        run = {"job_id": job["job_id"], "action_id": job["action_id"], "pgid": pgid, "deadline": self.clock() + float(job["timeout"])}
-        write_redacted(self.dir / "runs" / f"{action_key(job['action_id'])}.json", json.dumps(run, sort_keys=True))
+        run = {"job_id": job["job_id"], "action_id": job["action_id"], "attempt": job["attempt"], "pgid": pgid, "start": self.proc_start(pgid), "deadline": self.clock() + float(job["timeout"])}
+        write_redacted(self.dir / "runs" / f"{run_key(job['action_id'], job['attempt'])}.json", json.dumps(run, sort_keys=True))
 
     def _kill_overdue(self):
-        """Orphaned workers (their driver died) past their deadline: kill the process group, drop the run file."""
+        """Orphaned workers (their driver died) past their deadline: kill the process group, drop the run file.
+        The group is killed only while its leader is still the spawned worker (same start time): a pgid reused by an
+        unrelated process after a long downtime is left alone."""
         now = self.clock()
         for job in list(self.jobs.values()):
             if not job.get("orphan"): continue
-            f = self.dir / "runs" / f"{action_key(job['action_id'])}.json"
+            f = self.dir / "runs" / f"{run_key(job['action_id'], job['attempt'])}.json"
             if not f.exists(): continue
             try: run = json.loads(f.read_text())
             except ValueError: continue
             if float(run.get("deadline", 0)) > now: continue
-            try: os.killpg(int(run["pgid"]), signal.SIGKILL)
-            except (ProcessLookupError, PermissionError, KeyError, ValueError): pass
-            log.warning("killed the overdue worker group %s of %s (driver restarted)", run.get("pgid"), job["job_id"])
+            try: pgid = int(run["pgid"])
+            except (KeyError, TypeError, ValueError): pgid = None
+            start = self.proc_start(pgid) if pgid else None
+            if pgid and start is not None and start == run.get("start"):
+                try: os.killpg(pgid, signal.SIGKILL)
+                except (ProcessLookupError, PermissionError): pass
+                log.warning("killed the overdue worker group %s of %s (driver restarted)", pgid, job["job_id"])
+            else: log.warning("overdue worker group %s of %s is gone or no longer the worker (started %s, recorded %s): not killed", pgid, job["job_id"], start, run.get("start"))
             f.unlink(missing_ok=True)
 
     # -- DriverBackend -----------------------------------------------------------------
@@ -358,20 +397,28 @@ class BootstrapBackend:
         return {"ok": True}
 
     def release(self, thread: str) -> dict:
-        """The study in `thread` reached a terminal stage: remove its workers' worktrees (`git worktree remove --force`)."""
-        busy = {j["worker_id"] for j in self.jobs.values() if j.get("thread_id") not in (None, thread) and not j.get("stopped")}
+        """The study in `thread` reached a terminal stage: remove its workers' worktrees (`git worktree remove --force`).
+        A worktree with a job still running in it (a stopped worker being killed, say) is removed when that job's result is reaped."""
         removed = []
         for wid in dict.fromkeys(r["worker_id"] for r in self.lines(thread) if r.get("kind") == "job"):
-            path = self.worktrees / wid
-            if wid in busy or not path.exists(): continue
-            if self.b.subject_repo:
-                p = subprocess.run(["git", "-C", os.path.expanduser(self.b.subject_repo), "worktree", "remove", "--force", str(path)], capture_output=True, text=True)
-                if p.returncode:
-                    log.warning("worktree remove %s: %s", path, p.stderr.strip()[:200])
-                    continue
-            else: shutil.rmtree(path, ignore_errors=True)
-            removed.append(wid)
+            if self._busy(wid): self.pending_release.add(wid)
+            elif self._remove_worktree(wid): removed.append(wid)
         return {"removed": removed}
+
+    def _busy(self, worker_id: str) -> bool:
+        """A job of this worker launched in this process and not yet reaped (an orphan of a crashed driver has no thread here)."""
+        return any(j["worker_id"] == worker_id and not j.get("orphan") for j in self.jobs.values())
+
+    def _remove_worktree(self, worker_id: str) -> bool:
+        path = self.worktrees / worker_id
+        if not path.exists(): return False
+        if self.b.subject_repo:
+            p = subprocess.run(["git", "-C", os.path.expanduser(self.b.subject_repo), "worktree", "remove", "--force", str(path)], capture_output=True, text=True)
+            if p.returncode:
+                log.warning("worktree remove %s: %s", path, p.stderr.strip()[:200])
+                return False
+        else: shutil.rmtree(path, ignore_errors=True)
+        return True
 
     def delegate(self, thread: str, req: contracts.DelegateRequest) -> dict:
         aid = req.tags[0] if req.tags else (contracts.ref_of(req.brief) or "")
@@ -382,7 +429,7 @@ class BootstrapBackend:
         session_id, resume, attempt = self._session(aid, worker_id, req.role)
         cwd = self.worktree(worker_id)
         timeout = OVERRUN_FACTOR * self.cfg.projection.get(stage_of(aid) or "", self.cfg.stage_timeout)
-        argv, aux = self.argv(req.role, req.brief, session_id, resume, str(cwd), aid)
+        argv, aux = self.argv(req.role, req.brief, session_id, resume, str(cwd), aid, attempt)
         line = {"kind": "job", "action": "started", **self.place(thread), "job_id": f"job-{n}", "worker_id": worker_id, "role": req.role, "attempt": attempt, "inbox_id": f"grp-{n}",
                 "tags": list(req.tags), "action_id": aid, "brief": req.brief, "session_id": session_id, "resume": resume, "backend": self.b.worker, "cwd": str(cwd), "timeout": timeout, "reserved_usd": self.b.max_budget_usd_per_job, "time": self.clock()}
         self.journal.append(line, check=lambda rows: self._check_budget(aid, rows))  # spent + reserved + this job <= ceiling, atomically
@@ -419,11 +466,11 @@ class BootstrapBackend:
         else: path.mkdir(parents=True)
         return path
 
-    def argv(self, role: str, brief: str, session_id: str, resume: bool, cwd: str, aid: str) -> tuple[list[str], dict]:
+    def argv(self, role: str, brief: str, session_id: str, resume: bool, cwd: str, aid: str, attempt: int = 1) -> tuple[list[str], dict]:
         model, effort = self.b.models.get(role), self.b.efforts.get(role)
         role_file = Path(os.path.expanduser(self.b.roles_dir)) / f"{role}.md" if self.b.roles_dir else None
         if self.b.worker == "codex":
-            out = self.dir / "results" / f"{action_key(aid)}.codex.json"
+            out = self.dir / "results" / f"{run_key(aid, attempt)}.codex.json"
             schema = self.dir / "worker_result.schema.json"
             if not schema.exists(): schema.write_text(json.dumps(briefs.schema("worker_result")))
             argv = ["codex", "exec", "-C", cwd, "--sandbox", "workspace-write", "--output-schema", str(schema), "--output-last-message", str(out)]
@@ -450,22 +497,46 @@ class BootstrapBackend:
             stdout, rc = "", f"runner: {e}"[:200]
         with self._lock:
             job["ran"] = True
+            stopped = job["stopped"]
             forget = getattr(self.runner, "forget", None)
             if forget: forget(job["argv"])
-        outcome = self.outcome(job, stdout, rc)
-        if job["aux"].get("last_message") and Path(job["aux"]["last_message"]).exists():  # codex's own file: redacted in place
-            f = Path(job["aux"]["last_message"])
-            write_redacted(f, f.read_text())
-        write_redacted(self.dir / "results" / f"{action_key(job['action_id'])}.json", json.dumps(redact(outcome), sort_keys=True))  # durable before the journal line
-        (self.dir / "runs" / f"{action_key(job['action_id'])}.json").unlink(missing_ok=True)
+        key = run_key(job["action_id"], job["attempt"])
+        try:
+            outcome = self.outcome(job, stdout, rc)
+            if stopped: outcome = {**outcome, "job_status": "interrupted", "code": "stopped", "result": None}
+            outcome = self.charged(job, outcome)
+            if job["aux"].get("last_message") and Path(job["aux"]["last_message"]).exists():  # codex's own file: redacted in place
+                f = Path(job["aux"]["last_message"])
+                write_redacted(f, f.read_text())
+        except Exception as e:  # noqa: BLE001 - unreadable worker output is a failed job, never a dead thread holding its reservation
+            log.warning("worker output of %s unreadable: %s", job["job_id"], e)
+            outcome = self.charged(job, {"session_id": job["session_id"], "result": None, "job_status": "failed", "code": "worker_output_unreadable",
+                                         "total_cost_usd": cost_of(stdout) if isinstance(stdout, str) else 0.0, "cost_known": isinstance(stdout, str) and cost_known(stdout)})
+            if job["aux"].get("last_message"):
+                f = Path(job["aux"]["last_message"])
+                try:
+                    if f.exists(): write_redacted(f, f.read_bytes().decode(errors="replace"))
+                except OSError: f.unlink(missing_ok=True)
+        try: write_redacted(self.dir / "results" / f"{key}.json", json.dumps(redact(outcome), sort_keys=True))  # durable before the journal line
+        except Exception as e:  # noqa: BLE001
+            log.warning("result file of %s not written: %s", job["job_id"], e)
+        (self.dir / "runs" / f"{key}.json").unlink(missing_ok=True)
         self.done.put((job["job_id"], outcome))
+
+    def charged(self, job: dict, outcome: dict) -> dict:
+        """An interrupted (timed out, stopped) or unreadable job whose output carries no cost is charged its full reservation:
+        a killed `claude -p` prints nothing, yet it may have spent up to `max_budget_usd_per_job`."""
+        unknown = outcome["job_status"] == "interrupted" or outcome.get("code") == "worker_output_unreadable"
+        if unknown and not outcome.get("cost_known", True):
+            return {**outcome, "total_cost_usd": float(job.get("reserved_usd", self.b.max_budget_usd_per_job)), "cost_known": True}
+        return outcome
 
     def outcome(self, job: dict, stdout: str, rc) -> dict:
         """The worker's exit -> job_status, code, WorkerResult (machine_state from the worktree, not the model) and cost."""
         base = {"session_id": job["session_id"], "total_cost_usd": 0.0, "result": None, "code": None}
-        if rc is None: return {**base, "job_status": "interrupted", "code": "timeout", "total_cost_usd": cost_of(stdout)}  # killed: whatever cost it reported
+        if rc is None: return {**base, "job_status": "interrupted", "code": "timeout", "total_cost_usd": cost_of(stdout), "cost_known": cost_known(stdout)}  # killed: whatever cost it reported
         if isinstance(rc, str): return {**base, "job_status": "failed", "code": rc}
-        if rc: return {**base, "job_status": "failed", "code": f"exit {rc}", "total_cost_usd": cost_of(stdout)}
+        if rc: return {**base, "job_status": "failed", "code": f"exit {rc}", "total_cost_usd": cost_of(stdout), "cost_known": cost_known(stdout)}
         payload, cost, code = None, 0.0, None
         if self.b.worker == "codex":
             f = Path(job["aux"]["last_message"])
@@ -497,10 +568,13 @@ class BootstrapBackend:
             except queue.Empty: return
             job = self.jobs.get(job_id)
             if job is None: continue
-            if job.get("stopped"):  # stopped by the driver: interrupted, at the cost the worker reported
-                outcome = {**outcome, "job_status": "interrupted", "code": "stopped", "result": None}
+            if job.get("stopped"):  # stopped by the driver: interrupted, at the cost the worker reported (else its reservation)
+                outcome = self.charged(job, {**outcome, "job_status": "interrupted", "code": "stopped", "result": None})
             job["stopped"] = True
             self._record(job, outcome)
+            if job["worker_id"] in self.pending_release and not self._busy(job["worker_id"]):
+                self.pending_release.discard(job["worker_id"])
+                self._remove_worktree(job["worker_id"])
 
     def _record(self, job: dict, outcome: dict):
         line = {"kind": "job_result", "workspace": job["workspace"], "channel": job["channel"], "thread": job["thread"], "join_group": job["inbox_id"], "job_id": job["job_id"], "worker_id": job["worker_id"], "role": job["role"],

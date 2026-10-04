@@ -50,7 +50,7 @@ class Bootstrap:
     models: dict[str, str] = field(default_factory=dict)  # role -> model (claude --model / codex --model)
     efforts: dict[str, str] = field(default_factory=dict)  # role -> effort level (claude --effort)
     max_budget_usd_per_job: float = 5.0  # claude --max-budget-usd
-    max_cost_usd_per_study: float = 50.0  # ceiling on the sum of total_cost_usd over the journal; a delegate past it is refused
+    max_cost_usd_per_study: float = 50.0  # ceiling on the sum of total_cost_usd over the journal; a delegate past it is refused; 0 = no ceiling (required with codex)
     subject_repo: str = ""  # git repository the workers check out; empty -> plain directories under worktrees_dir
     subject_revision: str = "HEAD"  # `git worktree add --detach <worktree> <revision>`
     workspace: str = "journal"  # the workspace id of journal threads (`<workspace>:<channel>:<root ts>`)
@@ -153,8 +153,8 @@ def _backend(b: dict) -> Backend:
     if kind not in ("fridica", "bootstrap"): raise ValueError(f"[backend] kind must be fridica or bootstrap, not {kind!r}")
     bs = b.get("bootstrap", {})
     if str(bs.get("worker", "claude")) not in ("claude", "codex"): raise ValueError("[backend.bootstrap] worker must be claude or codex")
-    if str(bs.get("worker", "claude")) == "codex" and "max_cost_usd_per_study" in bs:
-        raise ValueError("[backend.bootstrap] max_cost_usd_per_study cannot be enforced with worker = \"codex\": codex reports no cost, so the ceiling would never trip; remove it or use worker = \"claude\"")
+    if str(bs.get("worker", "claude")) == "codex" and ("max_cost_usd_per_study" not in bs or float(bs["max_cost_usd_per_study"]) != 0):
+        raise ValueError("[backend.bootstrap] worker = \"codex\" needs max_cost_usd_per_study = 0 (no ceiling), stated explicitly: codex reports no cost, so a ceiling would never trip; or use worker = \"claude\"")
     d = Bootstrap()
     return Backend(kind, Bootstrap(
         journal_dir=str(bs.get("journal_dir", d.journal_dir)), worktrees_dir=str(bs.get("worktrees_dir", "")), worker=str(bs.get("worker", "claude")),

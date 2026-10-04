@@ -226,7 +226,7 @@ the restart probe are the same over either.
   (`claude -p --output-format json --json-schema <WorkerResult> --max-budget-usd <n>` or
   `codex exec -C <cwd> --output-schema`) run from `worktrees/<worker id>`, a detached
   `git worktree` of `subject_revision`, reused per worker id; when one exits, its result is
-  written to `results/<ActionId>.json` and then a `job_result` line (join_group, job_id,
+  written to `results/<ActionId>-a<attempt>.json` and then a `job_result` line (join_group, job_id,
   worker_id, role, attempt, job_status, result, code, total_cost_usd) is appended, from which
   `thread_view` is rebuilt for the restart probe. Peer lines (`sender != owner`) are never
   written by the backend; a corpus or a test injects them. Invariants the backend asserts in
@@ -240,16 +240,22 @@ the restart probe are the same over either.
   `max_cost_usd_per_study` on the finished jobs' `total_cost_usd` plus a
   `max_budget_usd_per_job` reservation per job in flight, checked inside the journal lock and
   released to the actual cost by the job's result: a delegate past it is refused with
-  `budget_exceeded`, which rule R turns into Blocked; codex reports no cost, so a ceiling with
-  `worker = "codex"` is a config error; each worker's process group and absolute deadline are
-  kept in `runs/` and a restarted backend kills the overdue groups of jobs that never
-  reported); a study's worktrees are removed when it reaches Delivered or Stopped (the
-  backend's `release`); redaction (`sk-`/`sk-ant-`, `ghp_`/`gho_`/`ghs_`/`ghu_`/`github_pat_`,
-  `xoxb-`/`xoxp-`/`xoxa-`/`xapp-`, `Bearer`, `AKIA` key ids and PEM private key blocks never
+  `budget_exceeded`, which rule R turns into Blocked; an interrupted job whose output carries
+  no cost is charged its full reservation; codex reports no cost, so `worker = "codex"` needs
+  an explicit `max_cost_usd_per_study = 0` (no ceiling); each worker's process group, leader
+  start time and absolute deadline are kept in `runs/<ActionId>-a<attempt>.json` and a
+  restarted backend kills the overdue groups of jobs that never reported, while the leader
+  still has that start time); unreadable worker output is a failed job
+  (`worker_output_unreadable`); a study's worktrees are removed when it reaches Delivered or
+  Stopped (the backend's `release`; a worktree with a running job when that job ends);
+  redaction (`sk-`/`sk-ant-` at a word start, `ghp_`/`gho_`/`ghs_`/`ghu_`/`ghr_`/`github_pat_`,
+  `xox[abeoprs]-`/`xapp-`, `Bearer` in any case, `AKIA` key ids and PEM private key blocks never
   reach any file the backend writes: the journal, `results/` including codex's last-message
   file, `sessions/`, `workers/`, `runs/`; the brief is kept only in the journal line); workers
-  run with a scrubbed environment (no `FRIDICA_*`, `SLACK_*`, `GH_TOKEN`, `GITHUB_TOKEN`, or
-  other `*_TOKEN`/`*_SECRET`/`*_API_KEY`, except the worker CLI's own credentials).
+  run with a scrubbed environment (no board `token_env`, `FRIDICA_*`, `SLACK_*`, `AWS_*`,
+  `GH_TOKEN`, `GITHUB_TOKEN`, `DATABASE_URL`, or other `*_TOKEN`/`*_SECRET`/`*_KEY`/
+  `*PASSWORD`/`*_PASS`/`*_CREDENTIALS`/`*_SOCK`, except the worker CLI's own credentials;
+  `HOME` is kept, so file-based credentials under it stay reachable).
   Swap-equivalence: corpus
   `000_bootstrap` driven through the bootstrap backend with a fake claude yields the same
   action sequence as through the fake control server. The bootstrap backend is frozen after

@@ -18,7 +18,7 @@ import pytest
 
 from fridica_research import cli, config, contracts, replay
 from fridica_research.backend import build_backend
-from fridica_research.backend.bootstrap import NAMESPACE, REDACT, BootstrapBackend, Journal, ProcessRunner, next_ts, worker_env
+from fridica_research.backend.bootstrap import NAMESPACE, REDACT, action_key, BootstrapBackend, Journal, ProcessRunner, next_ts, worker_env
 from fridica_research.backend.fridica import FridicaBackend
 from fridica_research.backend.protocol import ControlError, Unavailable
 from fridica_research.client import Client
@@ -453,17 +453,17 @@ def test_codex_argv_and_result_file(tmp_path):
     backend.join(10)
     backend.events(0)
     jr = [r for r in backend.journal.all() if r["kind"] == "job_result"][0]
-    job = backend.jobs if False else [r for r in backend.journal.all() if r["kind"] == "job"][0]
+    job = [r for r in backend.journal.all() if r["kind"] == "job"][0]
     assert jr["job_status"] == "finished" and jr["result"]["report"] == "codex report" and job["backend"] == "codex"
 
 
 # -- config and the CLI flow ----------------------------------------------------------------------------
 def test_backend_config_parses_and_round_trips():
-    c = config.parse('[backend]\nkind = "bootstrap"\n[backend.bootstrap]\njournal_dir = "/tmp/j"\nworktrees_dir = "/tmp/w"\nworker = "codex"\nmax_budget_usd_per_job = 2\nsubject_repo = "."\nretry_backoff = "1m"\n[backend.bootstrap.models]\nexplorer = "sonnet"\nimplementer = "opus"\n[backend.bootstrap.efforts]\nimplementer = "high"\n')
+    c = config.parse('[backend]\nkind = "bootstrap"\n[backend.bootstrap]\njournal_dir = "/tmp/j"\nworktrees_dir = "/tmp/w"\nworker = "codex"\nmax_budget_usd_per_job = 2\nmax_cost_usd_per_study = 0\nsubject_repo = "."\nretry_backoff = "1m"\n[backend.bootstrap.models]\nexplorer = "sonnet"\nimplementer = "opus"\n[backend.bootstrap.efforts]\nimplementer = "high"\n')
     b = c.backend
     assert b.kind == "bootstrap" and b.bootstrap.journal_dir == "/tmp/j" and b.bootstrap.worktrees_dir == "/tmp/w" and b.bootstrap.worker == "codex"
     assert b.bootstrap.models == {"explorer": "sonnet", "implementer": "opus"} and b.bootstrap.efforts == {"implementer": "high"}
-    assert b.bootstrap.max_budget_usd_per_job == 2 and b.bootstrap.max_cost_usd_per_study == 50 and b.bootstrap.subject_repo == "." and b.bootstrap.retry_backoff == 60
+    assert b.bootstrap.max_budget_usd_per_job == 2 and b.bootstrap.max_cost_usd_per_study == 0 and b.bootstrap.subject_repo == "." and b.bootstrap.retry_backoff == 60
     assert config.Config.from_dict(c.to_dict()) == c and config.parse("").backend == config.Backend()
     with pytest.raises(ValueError): config.parse('[backend]\nkind = "slack"\n')
     with pytest.raises(ValueError): config.parse('[backend]\nkind = "bootstrap"\n[backend.bootstrap]\nworker = "gemini"\n')
@@ -713,3 +713,179 @@ def test_codex_with_a_cost_ceiling_is_a_config_error():
     with pytest.raises(ValueError, match="codex reports no cost"):
         config.parse('[backend]\nkind = "bootstrap"\n[backend.bootstrap]\nworker = "codex"\nmax_cost_usd_per_study = 20\n')
     assert config.parse('[backend]\nkind = "bootstrap"\n[backend.bootstrap]\nworker = "claude"\nmax_cost_usd_per_study = 20\n').backend.bootstrap.max_cost_usd_per_study == 20
+
+
+# -- review fixes (iteration 3c): each fails on 0eab3e7 -------------------------------------------------
+def explore(backend, i: int, thread: str = "journal:C1:1.000000"):
+    backend.delegate(thread, explorer_req(f"t/g1/i1/Explore/a{i}/explorer"))
+    backend.join(10)
+    backend.events(0)
+
+
+def test_a_timed_out_job_without_a_cost_is_charged_its_reservation(tmp_path):
+    """A killed `claude -p` prints nothing: the timeout must not release the reservation to $0 (ceiling 5, 5 per job)."""
+    backend = BootstrapBackend(bootstrap_cfg(tmp_path, max_budget_usd_per_job=5.0, max_cost_usd_per_study=5.0), runner=lambda a, c, t: ("", None), sleep=lambda s: None)
+    explore(backend, 1)
+    with pytest.raises(ControlError) as e: explore(backend, 2)
+    assert (e.value.status, e.value.code) == (429, "budget_exceeded")
+    with pytest.raises(ControlError): explore(backend, 3)
+    jr = [r for r in backend.journal.all() if r["kind"] == "job_result"]
+    assert [(r["job_status"], r["code"], r["total_cost_usd"]) for r in jr] == [("interrupted", "timeout", 5.0)] and backend.spent() == 5.0
+
+
+def test_a_stopped_job_without_a_cost_is_charged_its_reservation(tmp_path):
+    gate = threading.Event()
+    class R:
+        def __call__(self, argv, cwd, timeout):
+            gate.wait(10)
+            return "", -9  # what the ProcessRunner returns after os.killpg
+        def kill(self, argv): gate.set()
+    backend = BootstrapBackend(bootstrap_cfg(tmp_path, max_budget_usd_per_job=2.0, max_cost_usd_per_study=10.0), runner=R(), sleep=lambda s: None)
+    r = backend.delegate("journal:C1:1.000000", explorer_req())
+    deadline = time.monotonic() + 10
+    while not backend.jobs["job-1"].get("launched") and time.monotonic() < deadline: time.sleep(0.01)
+    backend.stop("journal:C1:1.000000", r["jobs"][0]["worker_id"])
+    backend.join(10)
+    backend.events(0)
+    jr = [r for r in backend.journal.all() if r["kind"] == "job_result"]
+    assert [(r["job_status"], r["code"], r["total_cost_usd"]) for r in jr] == [("interrupted", "stopped", 2.0)]
+
+
+def test_the_scrub_drops_the_board_token_and_cloud_database_and_agent_secrets(tmp_path, monkeypatch):
+    env = {"PATH": os.environ["PATH"], "HOME": "/h", "BOARD_PAT": "b", "AWS_SECRET_ACCESS_KEY": "a", "AWS_ACCESS_KEY_ID": "a", "AWS_PROFILE": "p", "PGPASSWORD": "x", "DB_PASSWORD": "p",
+           "SMTP_PASS": "p", "GOOGLE_APPLICATION_CREDENTIALS": "/c", "SSH_AUTH_SOCK": "/s", "GPG_AGENT_SOCK": "/g", "DATABASE_URL": "postgres://u:p@h/d", "SIGNING_KEY": "k",
+           "ANTHROPIC_API_KEY": "a", "CLAUDE_CODE_OAUTH_TOKEN": "o", "OPENAI_API_KEY": "x"}
+    assert set(worker_env(env, "claude", drop=("BOARD_PAT",))) == {"PATH", "HOME", "ANTHROPIC_API_KEY", "CLAUDE_CODE_OAUTH_TOKEN"}
+    assert set(worker_env(env, "codex", drop=("BOARD_PAT",))) == {"PATH", "HOME", "OPENAI_API_KEY"}
+    # The default runner drops the board's token_env by name, whatever it is called.
+    for k, v in env.items(): monkeypatch.setenv(k, v)
+    cfg = bootstrap_cfg(tmp_path, dataclasses.replace(CFG, board=dataclasses.replace(CFG.board, token_env="BOARD_PAT")))
+    out, rc = BootstrapBackend(cfg, sleep=lambda s: None).runner(["sh", "-c", "env"], str(tmp_path), 5)
+    names = {line.split("=", 1)[0] for line in out.splitlines()}
+    assert rc == 0 and {"ANTHROPIC_API_KEY", "CLAUDE_CODE_OAUTH_TOKEN"} <= names
+    assert not names & {"BOARD_PAT", "PGPASSWORD", "AWS_SECRET_ACCESS_KEY", "AWS_ACCESS_KEY_ID", "AWS_PROFILE", "DB_PASSWORD", "SMTP_PASS", "GOOGLE_APPLICATION_CREDENTIALS", "SSH_AUTH_SOCK", "DATABASE_URL", "SIGNING_KEY"}
+
+
+def test_redaction_leaves_prose_alone_and_covers_more_prefixes():
+    prose = "A risk-based task-list for the disk-backed desk-top; ask-first, then mask-free. The bearer of bad news."
+    assert redact_one(prose) == prose
+    for x in ("bearer abcdef0123456", "BEARER abcdef0123456", "xoxe-1-abcdef123", "xoxr-abcdef123456", "ghr_AbCdEf123456", "(sk-proj-AbCdEf123456)"):
+        assert "[redacted]" in redact_one(x) and x.split()[-1].strip("()") not in redact_one(x), x
+
+
+def test_a_restarted_backend_leaves_a_reused_pgid_alone(tmp_path):
+    """The recorded pgid now leads a process started at another time (pid reuse after a long downtime): not killed."""
+    cfg = bootstrap_cfg(tmp_path, dataclasses.replace(CFG, projection={**CFG.projection, "explore": 100}))
+    gate = threading.Event()
+    b1 = BootstrapBackend(cfg, runner=lambda argv, cwd, timeout: (gate.wait(10), ("", None))[1], clock=Clock(1000.0), sleep=lambda s: None)
+    b1.delegate("journal:C1:1.000000", explorer_req())
+    stranger = subprocess.Popen(["sh", "-c", "sleep 30"], start_new_session=True)
+    try:
+        run = {"job_id": "job-1", "action_id": "t/g1/i1/Explore/a1/explorer", "attempt": 1, "pgid": stranger.pid, "start": "Thu Jan  1 00:00:00 1970", "deadline": 1200.0}
+        runs, key = Path(cfg.backend.bootstrap.journal_dir) / "runs", action_key(run["action_id"])
+        for name in (key, f"{key}-a1"): (runs / f"{name}.json").write_text(json.dumps(run))  # the 0eab3e7 name and this one
+        BootstrapBackend(cfg, runner=b1.runner, clock=Clock(1201.0), sleep=lambda s: None)
+        time.sleep(0.2)
+        assert stranger.poll() is None
+    finally:
+        stranger.kill()
+        gate.set()
+        b1.join(10)
+
+
+def test_an_orphaned_retry_is_not_answered_by_the_first_attempts_result(tmp_path):
+    cfg = bootstrap_cfg(tmp_path)
+    gate, calls = threading.Event(), []
+    def runner(argv, cwd, timeout):
+        calls.append(argv)
+        if len(calls) == 1: return "", 1
+        gate.wait(10)
+        return "", None
+    b1 = BootstrapBackend(cfg, runner=runner, sleep=lambda s: None)
+    aid = "t/g1/i1/Explore/a1/explorer"
+    explore_aid = lambda b: b.delegate("journal:C1:1.000000", explorer_req(aid))  # noqa: E731
+    explore_aid(b1)
+    b1.join(10)
+    b1.events(0)
+    explore_aid(b1)  # attempt 2 of the same ActionId, still running when the driver dies
+    try:
+        b2 = BootstrapBackend(cfg, runner=runner, sleep=lambda s: None)
+        jr = [(r["job_id"], r["attempt"], r["code"]) for r in b2.journal.all() if r["kind"] == "job_result"]
+        assert jr == [("job-1", 1, "exit 1")] and b2.jobs["job-2"]["orphan"]
+    finally:
+        gate.set()
+        b1.join(10)
+
+
+def test_a_same_action_id_retry_does_not_overwrite_the_orphans_process_group(tmp_path):
+    cfg = bootstrap_cfg(tmp_path, dataclasses.replace(CFG, projection={**CFG.projection, "explore": 100}))
+    gate, procs, aid = threading.Event(), [], "t/g1/i1/Explore/a1/explorer"
+    def spawning(backend):
+        def runner(argv, cwd, timeout):
+            p = subprocess.Popen(["sh", "-c", "sleep 30 & sleep 30"], start_new_session=True)
+            procs.append(p)
+            backend._spawned(argv, p.pid)
+            gate.wait(20)
+            return "", None
+        return runner
+    b1 = BootstrapBackend(cfg, clock=Clock(1000.0), sleep=lambda s: None, runner=lambda a, c, t: ("", None))
+    b1.runner = spawning(b1)
+    b1.delegate("journal:C1:1.000000", explorer_req(aid))  # attempt 1: deadline 1200; the driver dies
+    b2 = BootstrapBackend(cfg, clock=Clock(1100.0), sleep=lambda s: None, runner=lambda a, c, t: ("", None))
+    b2.runner = spawning(b2)
+    b2.delegate("journal:C1:1.000000", explorer_req(aid))  # attempt 2 of the same ActionId: deadline 1300; this driver dies too
+    deadline = time.monotonic() + 10
+    while len(procs) < 2 and time.monotonic() < deadline: time.sleep(0.01)
+    time.sleep(0.1)
+    try:
+        BootstrapBackend(cfg, clock=Clock(1250.0), sleep=lambda s: None, runner=lambda a, c, t: ("", None))
+        assert procs[0].wait(5) == -9  # attempt 1's group: past its deadline
+        assert procs[1].poll() is None  # attempt 2's: not yet
+    finally:
+        for p in procs:
+            try: os.killpg(p.pid, 9)
+            except ProcessLookupError: pass
+        gate.set()
+        b1.join(10)
+        b2.join(10)
+
+
+def test_codex_needs_an_explicit_zero_ceiling():
+    with pytest.raises(ValueError, match="max_cost_usd_per_study = 0"):
+        config.parse('[backend]\nkind = "bootstrap"\n[backend.bootstrap]\nworker = "codex"\n')
+    c = config.parse('[backend]\nkind = "bootstrap"\n[backend.bootstrap]\nworker = "codex"\nmax_cost_usd_per_study = 0\n')
+    assert c.backend.bootstrap.max_cost_usd_per_study == 0
+
+
+def test_a_zero_ceiling_is_no_ceiling(tmp_path):
+    backend = BootstrapBackend(bootstrap_cfg(tmp_path, worker="codex", max_cost_usd_per_study=0.0), runner=lambda a, c, t: ("", 1), sleep=lambda s: None)
+    explore(backend, 1)
+    explore(backend, 2)
+    assert len([r for r in backend.journal.all() if r["kind"] == "job_result"]) == 2
+
+
+def test_unreadable_worker_output_is_a_failed_job_that_releases_its_reservation(tmp_path):
+    cfg = bootstrap_cfg(tmp_path, worker="codex", max_budget_usd_per_job=5.0, max_cost_usd_per_study=100.0)
+    def runner(argv, cwd, timeout):
+        Path(argv[argv.index("--output-last-message") + 1]).write_bytes(b'{"status": "done", "report": "\xff\xfe"}')
+        return "", 0
+    backend = BootstrapBackend(cfg, runner=runner, sleep=lambda s: None)
+    explore(backend, 1)
+    jr = [r for r in backend.journal.all() if r["kind"] == "job_result"]
+    assert [(r["job_status"], r["code"], r["total_cost_usd"]) for r in jr] == [("failed", "worker_output_unreadable", 5.0)]
+    assert backend.reserved() == 0 and not backend.jobs and not list((Path(cfg.backend.bootstrap.journal_dir) / "runs").iterdir())
+
+
+def test_release_keeps_a_worktree_with_a_running_job_until_it_ends(tmp_path):
+    cfg = bootstrap_cfg(tmp_path)
+    gate = threading.Event()
+    backend = BootstrapBackend(cfg, runner=lambda a, c, t: (gate.wait(10), ("", None))[1], sleep=lambda s: None)
+    thread = "journal:C1:1.000000"
+    backend.delegate(thread, explorer_req())
+    wt = Path(cfg.backend.bootstrap.journal_dir) / "worktrees" / "w-1"
+    assert wt.exists()
+    assert backend.release(thread) == {"removed": []} and wt.exists()  # the worker still runs in it
+    gate.set()
+    backend.join(10)
+    backend.events(0)
+    assert not wt.exists()

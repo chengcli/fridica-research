@@ -205,7 +205,7 @@ class Approach:
     why: str = ""
 
 
-_APPROACH = re.compile(r"^\s*[-*]\s*(?P<slug>[a-z0-9][a-z0-9-]{0,47})\s*:\s*(?P<title>[^—]+?)(?:\s*(?:—|--)\s*(?P<why>.*))?\s*$", re.M)
+_APPROACH = re.compile(r"^\s*[-*]\s*(?P<wrap>`|\*\*)?(?P<slug>[a-z0-9][a-z0-9-]{0,47})(?(wrap)(?P=wrap))\s*:\s*(?P<title>[^—]+?)(?:\s*(?:—|--)\s*(?P<why>.*))?\s*$", re.M)
 
 
 def parse_approaches(report: str) -> list[Approach]:

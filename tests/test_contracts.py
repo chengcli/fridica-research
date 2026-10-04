@@ -39,6 +39,22 @@ def test_approaches_prefer_section_and_dedupe():
     assert c.parse_approaches("nothing") == []
 
 
+def test_approaches_normalize_matching_slug_wrappers():
+    report = """## Approaches
+- `alpha-one`: Backtick title -- first
+- **beta-two**: Bold title -- second
+- alpha-one: duplicate
+- `alpha-one`: decorated duplicate
+- **bad_slug**: invalid slug
+- `missing-end: unmatched backtick
+- **mismatched`: unmatched wrappers
+"""
+    assert c.parse_approaches(report) == [
+        c.Approach("alpha-one", "Backtick title", "first"),
+        c.Approach("beta-two", "Bold title", "second"),
+    ]
+
+
 def test_signoff_and_login():
     assert c.parse_signoff("ok SIGN-OFF https://github.com/o/r/pull/9 abc1234 Approve") == c.SignOff("https://github.com/o/r/pull/9", "abc1234", "approve")
     assert c.parse_signoff("SIGN-OFF pr sha approve") is None

@@ -58,7 +58,7 @@ def explorer(ref: str, problem: str, brief: str, questions: list[str], findings:
         ("Role", instructions("explorer")), ("Study", problem), ("Brief", brief), ("Questions", "\n".join(f"- {q}" for q in questions)),
         ("Approaches already claimed by peers", peers),
         ("Task", "Search literature and ecosystem prior art; propose sourced findings for debate, then viable approaches."),
-        ("Output format", "Include `## Findings for debate`, one line per finding: `- F<n>: <claim> -- source: <URL|DOI|repo@sha:path:line> -- test: <check>`. End the report with a `## Approaches` section: one line per viable approach, `- <slug>: <title> -- <why>`, slug `^[a-z0-9][a-z0-9-]{0,47}$`, most promising first."),
+        ("Output format", "Include `## Findings for debate`, one line per finding: `- F<n>: <claim> -- source: <URL|DOI|repo@sha:path:line> -- test: <check>`. End the report with a `## Approaches` section: one line per viable approach, `- <slug>: <title> -- <why>`, plain slug without backticks or bold markup matching `^[a-z0-9][a-z0-9-]{0,47}$`, most promising first."),
         ("Reference", f"ref: {ref}"),
     ], findings)
 

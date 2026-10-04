@@ -1,5 +1,17 @@
 # The study protocol, as the driver runs it
 
+## Repository charters
+
+- fridica-core: general mechanism only; no names, enums, defaults or prompt text specific to one host.
+- fridica-store-sqlite: storage contract only.
+- fridica: daemon, Slack, placement, egress; no research protocol.
+- fridica-research: research policy (roles, stages, stance, trees, rewards).
+
+Seed for the auditor decision tree in #25: area **layer boundary**. The audits that approved
+fridica-core #2 missed a spec-level policy leak; its layer-boundary observation is a
+confirmed miss (`z = -1`). A future audit that finds a similar request in a lower-layer issue
+reports `needs contract decision`, even when an implementation follows the issue exactly.
+
 This is what `fridica-research serve` does for every study. It was written from the owner's
 requirements of the bootstrap run (R1-R14, 2026-10-04, iterations 1 and 2) and the design decisions of the bootstrap
 debate (chengcli/fridica#126); the requirements are stated here as behaviour, not as instructions
@@ -92,16 +104,19 @@ hours and Finished on delivery.
 
 ## R5. Roles and the loop
 
-Roles are fridica's `assets/roles/*.md` catalog (explorer, mathematician, physicist, implementer,
-auditor); this package carries only the stage -> role mapping and the brief templates
-(`briefs.py`). Debate = mathematician || physicist, each report ending with a `## Stance` block
+Roles are this package's `roles/` catalog (explorer, debater with mathematician and physicist
+lenses, implementer, auditor). Every delegation sends the complete role text as `instructions`;
+the two debate lanes currently retain their lens names as worker identifiers. The host must
+include `instructions` in its instruction fingerprint when resuming a worker (fridica #130).
+Debate = mathematician || physicist, each report ending with a `## Stance` block
 (`position: agree|disagree|revised`, `notes:`); a missing position counts as `disagree`. Rounds
 count delegations: `round >= max_debate_rounds` is checked before delegating, so
 `max_debate_rounds = 0` goes straight to the synthesis call with no reports. The pair converges
 when both agree or the maximum is reached; the same two worker ids are resumed in every round and
 every iteration (so the persistent worker count stays at 3 of 4), and stopped at synthesis. The
-stance is parsed from text until fridica-core carries a `stance` field (`contracts.parse_stance`
-is the single seam).
+stance is parsed from the report block, or from an `annotations.stance` object once core #3
+provides that generic field (`contracts.parse_stance` is the single seam). The research
+convention for a missing or invalid position is `disagree`.
 
 ## R6. Audit by peers
 

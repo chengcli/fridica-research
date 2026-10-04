@@ -56,6 +56,8 @@ def test_root_post_starts_a_study_and_runs_to_claim(world):
     assert server.drivers[thread] == "external"
     job = server.job_of(thread, "explorer")
     assert "ref: " + s.waiting["id"] in job["brief"]
+    delegate_body = next(body for method, path, body in server.requests if method == "POST" and path.endswith("/delegate"))
+    assert "# Explorer" in delegate_body["instructions"]
     server.finish_job(thread, job["id"], result(report=EXPLORER_REPORT))
     drain(drv)
     s = drv.store.load(thread)

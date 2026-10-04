@@ -41,10 +41,12 @@ class DelegateRequest:
     backend: str = "same"  # same | other | <name>
     deliverable: str = "report"
     tags: tuple[str, ...] = ()
+    instructions: str = ""  # research role prose; host includes it in the worker instruction fingerprint
 
     def body(self) -> dict:
         b = {"role": self.role, "brief": self.brief, "context": self.context, "ephemeral": self.ephemeral, "backend": self.backend, "deliverable": self.deliverable, "tags": list(self.tags)}
         if self.worker_id: b["worker_id"] = self.worker_id
+        if self.instructions: b["instructions"] = self.instructions
         return b
 
 
@@ -171,6 +173,8 @@ def format_result(iteration: int, summary: str, lines_: list[str], ref: str, par
 _STANCE = re.compile(r"^##\s*Stance\s*$(?P<block>.*?)(?=^##\s|\Z)", re.M | re.S)
 POSITIONS = ("agree", "disagree", "revised")
 VERDICTS = ("pass", "return", "reject")
+DEFAULT_POSITION = "disagree"
+DEFAULT_VERDICT = "return"
 
 
 @dataclass(frozen=True)
@@ -181,10 +185,12 @@ class Stance:
 
 
 def parse_stance(result: dict | None) -> Stance:
-    """`stance` field when fridica-core carries it, else the `## Stance` block of `report`; absent -> safe direction (disagree/return) by the caller."""
+    """Research convention: structured annotations or the report block; missing values default to disagree/return at decision sites."""
     if not result: return Stance()
-    s = result.get("stance")
-    if isinstance(s, dict): return Stance(s.get("position"), s.get("verdict"), str(s.get("notes") or ""))
+    annotations = result.get("annotations")
+    s = annotations.get("stance") if isinstance(annotations, dict) else None
+    if isinstance(s, dict):
+        return Stance(s.get("position") if s.get("position") in POSITIONS else None, s.get("verdict") if s.get("verdict") in VERDICTS else None, str(s.get("notes") or ""))
     m = _STANCE.search(result.get("report") or "")
     if not m: return Stance()
     kv = lines(m.group("block"))

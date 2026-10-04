@@ -21,8 +21,17 @@ def test_root_roundtrip():
 def test_stance_from_block_or_field():
     assert c.parse_stance({"report": "x\n## Stance\nposition: revised\nverdict: pass\nnotes: n\n"}) == c.Stance("revised", "pass", "n")
     assert c.parse_stance({"report": "x\n## Stance\nposition: maybe\n"}) == c.Stance(None, None, "")
-    assert c.parse_stance({"stance": {"position": "agree", "verdict": "return"}}) == c.Stance("agree", "return", "")
+    assert c.parse_stance({"annotations": {"stance": {"position": "agree", "verdict": "return"}}}) == c.Stance("agree", "return", "")
+    assert c.parse_stance({"annotations": {"stance": {"position": "invalid", "verdict": "invalid"}}}) == c.Stance()
+    assert c.DEFAULT_POSITION == "disagree" and c.DEFAULT_VERDICT == "return"
     assert c.parse_stance(None) == c.Stance()
+
+
+def test_delegate_request_carries_role_instructions():
+    from fridica_research.roles import instructions
+    body = c.DelegateRequest("mathematician", "brief", instructions=instructions("debater", "mathematician")).body()
+    assert "# Debater" in body["instructions"] and "# Mathematician" in body["instructions"]
+    assert "# Physicist" not in body["instructions"]
 
 
 def test_approaches_prefer_section_and_dedupe():

@@ -11,6 +11,7 @@ from .board import Board, role_totals
 from .client import Client, read_capability
 from .driver import Driver, claude_runner
 from .replay import replay
+from .roles import ROLES, LENSES
 from .store import Store
 
 
@@ -83,6 +84,7 @@ def parser() -> argparse.ArgumentParser:
     s.add_argument("--issue", type=int, default=None, help="attach an existing GitHub issue as the study card")
     ls = sub.add_parser("list", help="list studies and their stages")
     ls.add_argument("--board", action="store_true", help="also print projected/actual hours per role and read each card back from the project")
+    sub.add_parser("roles", help="list packaged research roles and debater lenses")
     for name in ("stop", "resume"):
         c = sub.add_parser(name, help=f"{name} a study")
         c.add_argument("thread")
@@ -107,6 +109,10 @@ def cmd_replay(args) -> int:
 def main(argv: list[str] | None = None) -> int:
     args = parser().parse_args(argv)
     if args.cmd == "replay": return cmd_replay(args)
+    if args.cmd == "roles":
+        for role in ROLES:
+            print(role + (" (lenses: " + ", ".join(LENSES) + ")" if role == "debater" else ""))
+        return 0
     cfg = config.load(args.config)
     if args.cmd == "start": return cmd_start(cfg, args)
     if args.cmd == "list": return cmd_list(cfg, args)

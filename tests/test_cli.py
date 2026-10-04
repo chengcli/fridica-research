@@ -23,6 +23,11 @@ def test_help_and_subcommands():
     assert p.parse_args(["serve", "--once"]).once
 
 
+def test_roles_lists_packaged_catalog(capsys):
+    assert cli.main(["roles"]) == 0
+    assert "debater (lenses: mathematician, physicist)" in capsys.readouterr().out
+
+
 def test_start_posts_root_and_list_stop_resume(tmp_path, sock_dir, capsys, monkeypatch):
     monkeypatch.setattr(cli, "claude_runner", lambda model: (lambda name, prompt: {"brief": "b", "questions": []}))
     sock = os.path.join(sock_dir, "c.sock")

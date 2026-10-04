@@ -1,5 +1,6 @@
 # sdist contents beyond the package: the test suite with its helpers and the protocol docs.
 graft tests
 graft docs
+graft src/fridica_research/roles
 global-exclude __pycache__ *.py[cod]
 prune tests/__pycache__

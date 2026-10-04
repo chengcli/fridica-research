@@ -1,6 +1,6 @@
 """Brief templates and LLM prompts. Pure string builders; every brief and post carries a `ref:` line.
 
-Role prose lives in fridica's `assets/roles/*.md` catalog (R5); these templates only say what
+Role prose lives in this package's `roles/` catalog (R5); these templates only say what
 the stage needs from the role and in which format. `fit` keeps every brief under fridica-core's
 40 000-character brief cap and every post under Slack's 40 000 characters (64 KiB body cap), by
 dropping the oldest findings first and then truncating the longest section.
@@ -13,6 +13,12 @@ from importlib import resources
 from . import contracts
 
 ROLES = {"explore": "explorer", "debate": ("mathematician", "physicist"), "implement": "implementer", "audit": "auditor"}
+CHARTERS = (
+    "fridica-core: general mechanism only; no names, enums, defaults or prompt text specific to one host.",
+    "fridica-store-sqlite: storage contract only.",
+    "fridica: daemon, Slack, placement, egress; no research protocol.",
+    "fridica-research: research policy (roles, stages, stance, trees, rewards).",
+)
 
 
 def schema(name: str) -> dict:
@@ -73,6 +79,7 @@ def auditor(ref: str, problem: str, synthesis: str, implementer_summary: str, ma
     return fit([
         ("Study", problem), ("Synthesis the implementer followed", synthesis), ("Implementer summary", implementer_summary),
         ("Checkout", f"machine_state: {ms}\nIf the checkout is not reachable from your workspace, audit the text and say so."),
+        ("Layer charters", "\n".join(CHARTERS)),
         ("Task", f"Audit scope(s): {scope}. Peers audit the other scopes; do not duplicate them. Does the delivered work solve the study within scope, and does it meet the findings noted below? Report findings as the role prescribes."),
         ("Output format", "End the report with a `## Stance` block:\nverdict: pass|return|reject\nnotes: one line per finding that decides the verdict"),
         ("Reference", f"ref: {ref}"),

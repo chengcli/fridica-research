@@ -48,6 +48,18 @@ def test_claim_settles_into_debate_with_persistent_pair():
     roles = [a["role"] for a in w.kinds("delegate")]
     assert roles == ["explorer", "mathematician", "physicist"]
     assert all(a["ephemeral"] is False for a in w.kinds("delegate")[1:])
+    for a in w.kinds("delegate")[1:]:
+        assert "# Debater" in a["instructions"]
+        assert f"# {a['role'].title()}" in a["instructions"]
+        assert "needs contract decision" in a["instructions"]
+
+
+def test_auditor_brief_contains_lower_layer_charter():
+    w = World()
+    w.to_audit()
+    audit = [a for a in w.kinds("delegate") if a["role"] == "auditor"][0]
+    assert "fridica-core: general mechanism only" in audit["brief"]
+    assert "### Layer boundaries" in audit["instructions"]
 
 
 def test_claim_lost_to_earlier_peer_repicks():

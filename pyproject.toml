@@ -22,7 +22,7 @@ fridica-research = "fridica_research.cli:main"
 where = ["src"]
 
 [tool.setuptools.package-data]
-fridica_research = ["schemas/*.json"]
+fridica_research = ["schemas/*.json", "roles/*.md", "roles/lenses/*.md"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

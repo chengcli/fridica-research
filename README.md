@@ -1,5 +1,9 @@
 # fridica-research
 
+Research role policy is packaged in `src/fridica_research/roles/`. Run
+`fridica-research roles` to list the roles and the debater's lenses. Each delegation
+carries the selected role text in its `instructions` field.
+
 The auto-research stage machine and driver for [fridica](https://github.com/chengcli/fridica)
 (chengcli/fridica#126). A study is a root post in a research channel; the driver runs
 explorer -> claim -> (mathematician || physicist) debate -> implementer -> auditor -> delivery,

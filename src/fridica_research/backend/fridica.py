@@ -18,3 +18,4 @@ class FridicaBackend:
     def events(self, after: int | None, limit: int = 1000) -> dict: return self.client.events(after, limit)
     def thread_view(self, thread: str) -> dict: return self.client.get(contracts.thread_route(thread))
     def set_driver(self, thread: str, mode: str) -> dict: return self.client.set_driver(thread, mode)
+    def release(self, thread: str) -> dict: return {}  # fridica owns its workers' checkouts

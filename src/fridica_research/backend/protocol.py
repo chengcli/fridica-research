@@ -47,3 +47,6 @@ class DriverBackend(Protocol):
 
     def set_driver(self, thread: str, mode: str) -> dict:
         """Hand the thread to an external driver (`external`) or back to the parent."""
+
+    def release(self, thread: str) -> dict:
+        """The study in `thread` reached a terminal stage (Delivered, Stopped): free what the backend holds for it (worktrees)."""

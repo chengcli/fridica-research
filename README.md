@@ -95,7 +95,7 @@ worker = "claude"                   # claude | codex
 subject_repo = "~/src/fridica-research"   # workers run in `git worktree add --detach <worktrees>/<worker id> <subject_revision>`
 subject_revision = "HEAD"
 max_budget_usd_per_job = 5          # claude --max-budget-usd
-max_cost_usd_per_study = 50         # sum of total_cost_usd over the journal; a delegate past it is refused (rule R -> Blocked)
+max_cost_usd_per_study = 50         # finished jobs' total_cost_usd + max_budget_usd_per_job per job in flight; a delegate past it is refused (rule R -> Blocked); not allowed with worker = "codex" (no cost reported)
 permission_mode = "bypassPermissions"   # the worker is unattended inside its worktree
 # roles_dir = "~/src/fridica/assets/roles"   # <role>.md appended to the worker's system prompt (R5)
 # retry_backoff = "30s"             # before a re-run of the same ActionId; doubles per retry
@@ -118,9 +118,20 @@ Slack egress or ingress without fridica); with `require_signoffs = true` the aud
 for the stage timeout, with it false the local auditor worker decides. To try the loop with a
 fake claude, put a `claude` script first on `PATH` that prints one claude result object
 (`{"type": "result", "session_id": ..., "total_cost_usd": 0, "structured_output": {WorkerResult}}`);
-`tests/test_bootstrap_backend.py` does this in-process with a fake runner. The journal and
-the result files are redacted (`sk-`, `ghp_`, `xox[bp]-`, `Bearer` tokens) before they are
-written. The bootstrap backend is frozen after the promotion of R2.
+`tests/test_bootstrap_backend.py` does this in-process with a fake runner. Every file the
+backend writes under `journal_dir` (the journal, `results/` including codex's
+`--output-last-message` file, `sessions/`, `workers/`, `runs/`) is redacted before it is
+written: `sk-` (and `sk-ant-`), `ghp_`/`gho_`/`ghs_`/`ghu_`/`github_pat_`, `xoxb-`/`xoxp-`/`xoxa-`/`xapp-`,
+`Bearer <token>`, `AKIA...` AWS key ids and `-----BEGIN ... PRIVATE KEY-----` blocks; the brief
+is kept only in the redacted journal line. Workers run with a scrubbed environment: `FRIDICA_*`,
+`SLACK_*`, `GH_TOKEN`, `GITHUB_TOKEN` and every `*_TOKEN` / `*_SECRET` / `*_API_KEY` are dropped,
+except the worker CLI's own credentials (`ANTHROPIC_API_KEY`, `ANTHROPIC_AUTH_TOKEN`,
+`CLAUDE_CODE_OAUTH_TOKEN` for claude; `OPENAI_API_KEY`, `CODEX_API_KEY` for codex; claude's
+OAuth login in `~/.claude` needs none of them). Each worker's process group and absolute
+deadline are kept in `runs/`, so a driver restarted after a crash kills workers that outlived
+it past their deadline; a study's worktrees are removed (`git worktree remove --force`) when it
+reaches Delivered or Stopped (Blocked keeps them for the resume). The bootstrap backend is
+frozen after the promotion of R2.
 
 ## Architecture
 
@@ -180,4 +191,5 @@ corpus 000, the journal's single writer, the 2x kill, the cost ceiling, redactio
 - Owner-stop does not post a `released` claim; peers keep treating the slug as taken.
 - The bootstrap backend has no Slack: no peer claims or sign-offs arrive, and `backend = "other"`
   on the auditor delegate is ignored (every worker is the configured `worker`). `codex` workers
-  are not resumed across rounds (no session id up front) and report no cost.
+  are not resumed across rounds (no session id up front) and report no cost, so a
+  `max_cost_usd_per_study` with `worker = "codex"` is refused at config load.

@@ -18,7 +18,7 @@ import pytest
 
 from fridica_research import cli, config, contracts, replay
 from fridica_research.backend import build_backend
-from fridica_research.backend.bootstrap import NAMESPACE, BootstrapBackend, Journal, ProcessRunner, next_ts
+from fridica_research.backend.bootstrap import NAMESPACE, REDACT, BootstrapBackend, Journal, ProcessRunner, next_ts, worker_env
 from fridica_research.backend.fridica import FridicaBackend
 from fridica_research.backend.protocol import ControlError, Unavailable
 from fridica_research.client import Client
@@ -121,8 +121,10 @@ class ViaJournal(Scripted):
     def __init__(self, cfg, clock):
         self.queues = {r: queue.Queue() for r in ROLE_OF.values()}
         self.calls: list[tuple[list[str], str, float]] = []
+        self.heads: list[str] = []
         def runner(argv, cwd, timeout):
             self.calls.append((argv, cwd, timeout))
+            self.heads.append(subprocess.run(["git", "-C", cwd, "rev-parse", "HEAD"], capture_output=True, text=True).stdout.strip())
             return claude_json(self.queues[role_of(argv)].get(), argv), 0  # blocks until the scenario releases this role's result
         self.backend = BootstrapBackend(cfg, runner=runner, clock=clock, sleep=lambda s: None)
         super().__init__(cfg, make_driver(cfg, self.backend, clock), clock)
@@ -209,7 +211,13 @@ def test_swap_equivalence_on_corpus_000_bootstrap(tmp_path, sock_dir):
     # Every worker ran from a detached worktree of the subject revision, one per worker id, reused across rounds (the 7th call is the follow-on child's explorer).
     cwds = {c[1] for c in b.calls}
     assert len(b.calls) == 7 and len(cwds) == 5 and len({c[1] for c in b.calls[:6]}) == 4 and all(Path(c).parent == Path(bcfg.backend.bootstrap.journal_dir) / "worktrees" for c in cwds)
-    assert all(subprocess.run(["git", "-C", c, "rev-parse", "HEAD"], capture_output=True, text=True).stdout.strip() == sha for c in cwds)
+    deadline = time.monotonic() + 10
+    while len(b.heads) < 7 and time.monotonic() < deadline: time.sleep(0.01)  # the child's explorer thread records its head after its call
+    assert b.heads == [sha] * 7
+    # The parent reached Delivered: its four workers' worktrees are gone (`git worktree remove`); the child's explorer keeps its own.
+    listed = subprocess.run(["git", "-C", str(tmp_path / "subject"), "worktree", "list", "--porcelain"], capture_output=True, text=True).stdout
+    parent, child = {c[1] for c in b.calls[:6]}, b.calls[6][1]
+    assert not any(Path(c).exists() or c in listed for c in parent) and Path(child).exists() and child in listed
     # The echo of every own post arrived through the poll with a cursor and a fixed-width ts, never synthesised in execute.
     msgs = [r for r in b.backend.journal.all() if r["kind"] == "message" and r["sender"] == OWNER]
     assert all(r["cursor"] == r["seq"] and len(r["ts"].split(".")[1]) == 6 for r in msgs)
@@ -290,7 +298,7 @@ def test_kill_at_twice_the_stage_projection_through_the_driver(tmp_path):
     assert jr[0]["job_status"] == "interrupted" and jr[0]["code"] == "timeout" and jr[0]["result"] is None
     s = drv.store.load(thread)
     assert s.attempt == 2 and s.stage == "Explore"  # rule R re-ran the stage (a new ActionId, attempt 1 of it: no backoff)
-    assert len(seen) == 2 and (Path(cfg.backend.bootstrap.journal_dir) / "results").glob("*.json")
+    assert len(seen) == 2 and len(list((Path(cfg.backend.bootstrap.journal_dir) / "results").glob("*.json"))) == 1  # the killed job's result file (the retry is still running)
 
 
 def test_process_runner_kills_the_process_group_at_the_deadline(tmp_path):
@@ -451,11 +459,11 @@ def test_codex_argv_and_result_file(tmp_path):
 
 # -- config and the CLI flow ----------------------------------------------------------------------------
 def test_backend_config_parses_and_round_trips():
-    c = config.parse('[backend]\nkind = "bootstrap"\n[backend.bootstrap]\njournal_dir = "/tmp/j"\nworktrees_dir = "/tmp/w"\nworker = "codex"\nmax_budget_usd_per_job = 2\nmax_cost_usd_per_study = 20\nsubject_repo = "."\nretry_backoff = "1m"\n[backend.bootstrap.models]\nexplorer = "sonnet"\nimplementer = "opus"\n[backend.bootstrap.efforts]\nimplementer = "high"\n')
+    c = config.parse('[backend]\nkind = "bootstrap"\n[backend.bootstrap]\njournal_dir = "/tmp/j"\nworktrees_dir = "/tmp/w"\nworker = "codex"\nmax_budget_usd_per_job = 2\nsubject_repo = "."\nretry_backoff = "1m"\n[backend.bootstrap.models]\nexplorer = "sonnet"\nimplementer = "opus"\n[backend.bootstrap.efforts]\nimplementer = "high"\n')
     b = c.backend
     assert b.kind == "bootstrap" and b.bootstrap.journal_dir == "/tmp/j" and b.bootstrap.worktrees_dir == "/tmp/w" and b.bootstrap.worker == "codex"
     assert b.bootstrap.models == {"explorer": "sonnet", "implementer": "opus"} and b.bootstrap.efforts == {"implementer": "high"}
-    assert b.bootstrap.max_budget_usd_per_job == 2 and b.bootstrap.max_cost_usd_per_study == 20 and b.bootstrap.subject_repo == "." and b.bootstrap.retry_backoff == 60
+    assert b.bootstrap.max_budget_usd_per_job == 2 and b.bootstrap.max_cost_usd_per_study == 50 and b.bootstrap.subject_repo == "." and b.bootstrap.retry_backoff == 60
     assert config.Config.from_dict(c.to_dict()) == c and config.parse("").backend == config.Backend()
     with pytest.raises(ValueError): config.parse('[backend]\nkind = "slack"\n')
     with pytest.raises(ValueError): config.parse('[backend]\nkind = "bootstrap"\n[backend.bootstrap]\nworker = "gemini"\n')
@@ -467,6 +475,7 @@ def test_cli_start_then_serve_with_the_bootstrap_backend(tmp_path, monkeypatch, 
     monkeypatch.setattr(cli, "claude_runner", lambda model: (lambda name, prompt: LLM[name]))
     calls = []
     class FakeProcessRunner:
+        def __init__(self, **kw): pass  # env, on_spawn
         def __call__(self, argv, cwd, timeout):
             calls.append(argv)
             return claude_json(payload(result(report=EXPLORER_REPORT)), argv), 0
@@ -481,3 +490,226 @@ def test_cli_start_then_serve_with_the_bootstrap_backend(tmp_path, monkeypatch, 
     assert len(studies) == 1 and studies[0].stage == "Explore" and studies[0].thread.startswith("journal:C1:") and studies[0].projected_hours == 2
     assert len(calls) == 1 and calls[0][0] == "claude" and "ref: " + studies[0].waiting["actions"][0]["action_id"] in calls[0][-1]
     assert cli.main(["--config", str(p), "list"]) == 0
+
+
+# -- review fixes (iteration 3b): each fails on f554aea -------------------------------------------------
+def explorer_req(aid: str = "t/g1/i1/Explore/a1/explorer", worker_id: str | None = None) -> contracts.DelegateRequest:
+    return contracts.DelegateRequest("explorer", f"b\nref: {aid}", worker_id=worker_id, tags=(aid,))
+
+
+def test_ceiling_reserves_the_budget_of_jobs_in_flight(tmp_path):
+    """Debate issues two delegates at once: with ceiling 5 and 5 per job the second is refused while the first is running."""
+    gate = threading.Event()
+    def runner(argv, cwd, timeout):
+        gate.wait(10)
+        return claude_json(payload(result(report="r")), argv, cost=0.5), 0
+    backend = BootstrapBackend(bootstrap_cfg(tmp_path, max_budget_usd_per_job=5.0, max_cost_usd_per_study=5.0), runner=runner, sleep=lambda s: None)
+    thread = "journal:C1:1.000000"
+    backend.delegate(thread, contracts.DelegateRequest("mathematician", "b\nref: t/g1/i1/Debate/a1/debate-1-mathematician", tags=("t/g1/i1/Debate/a1/debate-1-mathematician",)))
+    assert backend.spent() == 0 and backend.reserved() == 5.0
+    with pytest.raises(ControlError) as e: backend.delegate(thread, contracts.DelegateRequest("physicist", "b\nref: t/g1/i1/Debate/a1/debate-1-physicist", tags=("t/g1/i1/Debate/a1/debate-1-physicist",)))
+    assert (e.value.status, e.value.code) == (429, "budget_exceeded") and len([r for r in backend.journal.all() if r["kind"] == "job"]) == 1
+    gate.set()
+    backend.join(10)
+    backend.events(0)
+    assert (backend.spent(), backend.reserved()) == (0.5, 0.0)  # the result released the reservation to the actual cost
+
+
+def test_result_releases_the_reservation_to_the_actual_cost(tmp_path):
+    gate = threading.Event()
+    def runner(argv, cwd, timeout):
+        gate.wait(10)
+        return claude_json(payload(result(report="r")), argv, cost=0.5), 0
+    backend = BootstrapBackend(bootstrap_cfg(tmp_path, max_budget_usd_per_job=5.0, max_cost_usd_per_study=6.0), runner=runner, sleep=lambda s: None)
+    backend.delegate("journal:C1:1.000000", explorer_req("t/g1/i1/Explore/a1/explorer"))
+    with pytest.raises(ControlError): backend.delegate("journal:C1:1.000000", explorer_req("t/g1/i1/Explore/a2/explorer"))  # 0 + 5 + 5 > 6
+    gate.set()
+    backend.join(10)
+    backend.events(0)
+    backend.delegate("journal:C1:1.000000", explorer_req("t/g1/i1/Explore/a3/explorer"))  # 0.5 + 0 + 5 <= 6
+    backend.join(10)
+
+
+SECRETS = ["sk-ant-api03-AbCdEf123456", "sk-proj-AbCdEf123456", "ghp_AbCdEf123456", "gho_AbCdEf123456", "ghs_AbCdEf123456", "ghu_AbCdEf123456",
+           "github_pat_11ABCDEF0_abcdef123456", "xoxb-123-456-abcdef", "xoxp-123-456-abcdef", "xoxa-2-abcdef123", "xapp-1-A123-456-abcdef",
+           "Bearer eyJhbGciOiJIUzI1NiJ9.e30.abc", "AKIAIOSFODNN7EXAMPLE", "-----BEGIN RSA PRIVATE KEY-----\nMIIEowIBAAKCAQEA1234\n-----END RSA PRIVATE KEY-----"]
+LEAKY = "secrets: " + " | ".join(SECRETS)
+
+
+def written_files(cfg) -> list[Path]:
+    """Every file the backend wrote under the journal dir (the worktrees are the worker's own checkout)."""
+    root = Path(cfg.backend.bootstrap.journal_dir)
+    return [f for f in root.rglob("*") if f.is_file() and "worktrees" not in f.relative_to(root).parts and f.name != "journal.lock"]
+
+
+def assert_no_secret(cfg):
+    for f in written_files(cfg):
+        text = f.read_text()
+        leaked = [x for x in SECRETS if x in text or x.replace("\n", "\\n") in text]
+        assert not leaked and not REDACT.search(text), (f, leaked)
+
+
+@pytest.mark.parametrize("worker", ["claude", "codex"])
+def test_every_file_the_backend_writes_is_redacted(tmp_path, worker):
+    cfg = bootstrap_cfg(tmp_path, worker=worker)
+    def runner(argv, cwd, timeout):
+        assert all(x in argv[-1] for x in SECRETS)  # the worker itself gets the brief as written
+        if worker == "codex":
+            Path(argv[argv.index("--output-last-message") + 1]).write_text(json.dumps(payload(result(report=LEAKY))))
+            return "", 0
+        return claude_json(payload(result(report=LEAKY)), argv), 0
+    backend = BootstrapBackend(cfg, runner=runner, sleep=lambda s: None)
+    thread = backend.post("C1", contracts.PostRequest("study_root", f"root {LEAKY}\n\nref: r", details=LEAKY))["thread"]
+    aid = "t/g1/i1/Explore/a1/explorer"
+    backend.delegate(thread, contracts.DelegateRequest("explorer", f"brief {LEAKY}\nref: {aid}", tags=(aid,)))
+    backend.join(10)
+    backend.events(0)
+    jr = [r for r in backend.journal.all() if r["kind"] == "job_result"][0]
+    assert jr["job_status"] == "finished" and jr["result"]["report"].startswith("secrets: [redacted] | [redacted]")
+    assert not (Path(cfg.backend.bootstrap.journal_dir) / "prompts").exists()  # the brief lives only in the redacted journal line
+    names = {f.name for f in written_files(cfg)}
+    assert "journal.jsonl" in names and any(n.endswith(".codex.json") for n in names) == (worker == "codex")
+    assert_no_secret(cfg)
+
+
+def test_redact_covers_the_token_shapes():
+    for x in SECRETS: assert "[redacted]" in redact_one(x) and x not in redact_one(f"a {x} b"), x
+    assert redact_one("-----BEGIN OPENSSH PRIVATE KEY-----\nabc\n") == "[redacted]"  # an unterminated block to the end
+    assert redact_one("plain sk text, ghp and Bearer") == "plain sk text, ghp and Bearer"
+
+
+def redact_one(text: str) -> str:
+    from fridica_research.backend.bootstrap import redact
+    return redact(text)
+
+
+def test_a_retry_stopped_during_its_backoff_never_launches(tmp_path):
+    cfg = bootstrap_cfg(tmp_path, retry_backoff=30.0)
+    in_backoff, release, calls = threading.Event(), threading.Event(), []
+    def sleep(s):
+        in_backoff.set()
+        release.wait(10)
+    def runner(argv, cwd, timeout):
+        calls.append(argv)
+        return "", 1
+    backend = BootstrapBackend(cfg, runner=runner, sleep=sleep)
+    thread, aid = "journal:C1:1.000000", "t/g1/i1/Explore/a1/explorer"
+    backend.delegate(thread, explorer_req(aid))
+    backend.join(10)
+    r = backend.delegate(thread, explorer_req(aid))  # the same ActionId again: attempt 2 backs off first
+    assert in_backoff.wait(10)
+    backend.stop(thread, r["jobs"][0]["worker_id"])
+    release.set()
+    backend.join(10)
+    backend.events(0)
+    assert len(calls) == 1  # the stopped retry was never started
+    jr = [r for r in backend.journal.all() if r["kind"] == "job_result"]
+    assert [(r["attempt"], r["job_status"], r["code"]) for r in jr] == [(1, "failed", "exit 1"), (2, "interrupted", "stopped")]
+
+
+def test_stopped_and_timed_out_jobs_record_their_real_cost(tmp_path):
+    cfg = bootstrap_cfg(tmp_path)
+    gate = threading.Event()
+    class R:
+        def __call__(self, argv, cwd, timeout):
+            if "a1" in argv[-1]: return claude_json(payload(result(report="r")), argv, cost=0.7), None  # killed at the deadline
+            gate.wait(10)
+            return claude_json(payload(result(report="r")), argv, cost=0.4), None  # killed by stop
+        def kill(self, argv): gate.set()
+    backend = BootstrapBackend(cfg, runner=R(), sleep=lambda s: None)
+    thread = "journal:C1:1.000000"
+    backend.delegate(thread, explorer_req("t/g1/i1/Explore/a1/explorer"))
+    backend.join(10)
+    r = backend.delegate(thread, explorer_req("t/g1/i1/Explore/a2/explorer"))
+    deadline = time.monotonic() + 10
+    while not backend.jobs["job-2"].get("launched") and time.monotonic() < deadline: time.sleep(0.01)
+    backend.stop(thread, r["jobs"][0]["worker_id"])
+    backend.join(10)
+    backend.events(0)
+    jr = [r for r in backend.journal.all() if r["kind"] == "job_result"]
+    assert [(r["job_status"], r["code"], r["total_cost_usd"]) for r in jr] == [("interrupted", "timeout", 0.7), ("interrupted", "stopped", 0.4)]
+    assert backend.spent() == 1.1
+
+
+def test_workers_get_a_scrubbed_environment(tmp_path, monkeypatch):
+    env = {"PATH": os.environ["PATH"], "HOME": "/h", "LANG": "C", "FRIDICA_CAPABILITY": "c", "GH_TOKEN": "g", "GITHUB_TOKEN": "g", "SLACK_BOT_TOKEN": "s", "SLACK_APP_LEVEL": "s",
+           "NPM_TOKEN": "n", "DB_SECRET": "d", "STRIPE_API_KEY": "k", "ANTHROPIC_API_KEY": "a", "CLAUDE_CODE_OAUTH_TOKEN": "o", "ANTHROPIC_AUTH_TOKEN": "t", "OPENAI_API_KEY": "x", "CODEX_API_KEY": "y"}
+    assert set(worker_env(env, "claude")) == {"PATH", "HOME", "LANG", "ANTHROPIC_API_KEY", "CLAUDE_CODE_OAUTH_TOKEN", "ANTHROPIC_AUTH_TOKEN"}
+    assert set(worker_env(env, "codex")) == {"PATH", "HOME", "LANG", "OPENAI_API_KEY", "CODEX_API_KEY"}
+    for k, v in env.items(): monkeypatch.setenv(k, v)
+    backend = BootstrapBackend(bootstrap_cfg(tmp_path), sleep=lambda s: None)  # the default runner
+    out, rc = backend.runner(["sh", "-c", "env"], str(tmp_path), 5)
+    names = {line.split("=", 1)[0] for line in out.splitlines()}
+    assert rc == 0 and {"PATH", "ANTHROPIC_API_KEY", "CLAUDE_CODE_OAUTH_TOKEN"} <= names
+    assert not names & {"FRIDICA_CAPABILITY", "GH_TOKEN", "GITHUB_TOKEN", "SLACK_BOT_TOKEN", "SLACK_APP_LEVEL", "NPM_TOKEN", "DB_SECRET", "STRIPE_API_KEY", "OPENAI_API_KEY"}
+
+
+def test_process_runner_reports_the_process_group(tmp_path):
+    got = []
+    out, rc = ProcessRunner(on_spawn=lambda argv, pgid: got.append((argv[0], pgid)))(["sh", "-c", "echo $$"], str(tmp_path), 5)
+    assert rc == 0 and got == [("sh", int(out))]
+
+
+def test_a_restarted_backend_kills_an_overdue_orphaned_worker_group(tmp_path):
+    """The driver died with a worker running: the run file holds its pgid and absolute deadline, and a restart past it kills the group."""
+    cfg = bootstrap_cfg(tmp_path, dataclasses.replace(CFG, projection={**CFG.projection, "explore": 100}))
+    gate, procs = threading.Event(), []
+    b1 = BootstrapBackend(cfg, runner=lambda argv, cwd, timeout: (None, None), clock=Clock(1000.0), sleep=lambda s: None)
+    def runner(argv, cwd, timeout):  # a ProcessRunner whose driver is about to die: the group outlives it
+        p = subprocess.Popen(["sh", "-c", "sleep 30 & sleep 30"], start_new_session=True)
+        procs.append(p)
+        b1._spawned(argv, p.pid)
+        gate.wait(10)
+        return "", None
+    b1.runner = runner
+    aid = "t/g1/i1/Explore/a1/explorer"
+    b1.delegate("journal:C1:1.000000", explorer_req(aid))
+    runs = Path(cfg.backend.bootstrap.journal_dir) / "runs"
+    deadline = time.monotonic() + 10
+    while not list(runs.glob("*.json")) and time.monotonic() < deadline: time.sleep(0.01)
+    run = json.loads(next(runs.glob("*.json")).read_text())
+    assert run["pgid"] == procs[0].pid and run["deadline"] == 1200.0 and run["job_id"] == "job-1"  # 1000 + 2 x 100 s
+    try:
+        BootstrapBackend(cfg, runner=runner, clock=Clock(1150.0), sleep=lambda s: None)  # restarted before the deadline: left alone
+        time.sleep(0.2)
+        assert procs[0].poll() is None
+        b3 = BootstrapBackend(cfg, runner=runner, clock=Clock(1201.0), sleep=lambda s: None)  # restarted past it: the group is killed
+        assert procs[0].wait(5) == -9 and not list(runs.glob("*.json"))
+        assert b3.jobs["job-1"]["stopped"]  # still no result: the stage timer retries (rule R)
+    finally:
+        for p in procs:
+            try: os.killpg(p.pid, 9)
+            except ProcessLookupError: pass
+        gate.set()
+        b1.join(10)
+
+
+def test_worktrees_are_removed_when_the_study_stops(tmp_path):
+    sha = git_repo(tmp_path / "subject")
+    cfg = bootstrap_cfg(tmp_path, subject_repo=str(tmp_path / "subject"))
+    gate, cwds = threading.Event(), []
+    class R:
+        def __call__(self, argv, cwd, timeout):
+            cwds.append(cwd)
+            gate.wait(10)
+            return "", None
+        def kill(self, argv): gate.set()
+    backend = BootstrapBackend(cfg, runner=R(), sleep=lambda s: None)
+    drv = make_driver(cfg, backend)
+    thread = backend.post("C1", contracts.PostRequest("study_root", "Study\n\nprojected: 1 h\ngeneration: 1\nlineage: origin\nref: r"))["thread"]
+    drain(drv)
+    wt = Path(cfg.backend.bootstrap.journal_dir) / "worktrees" / "w-1"
+    assert wt.exists() and subprocess.run(["git", "-C", str(wt), "rev-parse", "HEAD"], capture_output=True, text=True).stdout.strip() == sha
+    drv.store.command(thread, "stop")
+    drain(drv)
+    backend.join(10)
+    drain(drv)
+    assert drv.store.load(thread).stage == "Stopped" and cwds == [str(wt)]
+    listed = subprocess.run(["git", "-C", str(tmp_path / "subject"), "worktree", "list", "--porcelain"], capture_output=True, text=True).stdout
+    assert not wt.exists() and str(wt) not in listed
+
+
+def test_codex_with_a_cost_ceiling_is_a_config_error():
+    with pytest.raises(ValueError, match="codex reports no cost"):
+        config.parse('[backend]\nkind = "bootstrap"\n[backend.bootstrap]\nworker = "codex"\nmax_cost_usd_per_study = 20\n')
+    assert config.parse('[backend]\nkind = "bootstrap"\n[backend.bootstrap]\nworker = "claude"\nmax_cost_usd_per_study = 20\n').backend.bootstrap.max_cost_usd_per_study == 20

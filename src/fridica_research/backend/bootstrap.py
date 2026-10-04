@@ -19,9 +19,18 @@ Invariants the tests assert (`tests/test_bootstrap_backend.py`):
 - deterministic sessions: the worker's session id is `uuid5(NAMESPACE, ActionId)`; a re-sent
   delegate for the same ActionId (restart probe, rule R) runs `--resume`, never a duplicate;
 - bounded: the process group is killed at 2x the stage projection (`OVERRUN_FACTOR`), a retry
-  of a seen ActionId backs off exponentially, `--max-budget-usd` bounds a job and the sum of
-  `total_cost_usd` over the journal is capped per study (a delegate past it is refused);
-- redaction-clean: every string written to the journal passes `redact`.
+  of a seen ActionId backs off exponentially (and never launches once stopped), `--max-budget-usd`
+  bounds a job, and the per-study ceiling covers the finished jobs' `total_cost_usd` plus a
+  `max_budget_usd_per_job` reservation for every job still in flight, checked inside the journal
+  lock (a delegate past it is refused); each worker's process group id and absolute deadline are
+  kept in `runs/<ActionId key>.json`, and a restarted backend kills the overdue groups of jobs
+  that never reported; a study's worktrees are removed when it reaches a terminal stage;
+- redaction-clean: every file the backend writes (journal, `results/`, including codex's
+  `--output-last-message` file, `sessions/`, `workers/`, `runs/`) passes `redact`; the brief is
+  not kept anywhere but the redacted journal line;
+- scrubbed workers: the worker's environment drops `FRIDICA_*`, `SLACK_*`, `GH_TOKEN`,
+  `GITHUB_TOKEN` and every `*_TOKEN` / `*_SECRET` / `*_API_KEY` except the worker CLI's own
+  credentials (`WORKER_CREDENTIALS`).
 
 The runner is pluggable (`runner(argv, cwd, timeout) -> (stdout, returncode)`, `returncode`
 None when killed at the deadline) so tests use a fake claude.
@@ -37,6 +46,7 @@ import logging
 import os
 import queue
 import re
+import shutil
 import signal
 import subprocess
 import threading
@@ -54,8 +64,29 @@ log = logging.getLogger("fridica_research.backend.bootstrap")
 Runner = Callable[[list[str], str, float], tuple[str, int | None]]
 NAMESPACE = uuid.UUID("6f1c2b0e-5a7d-4f1e-9c3a-2b8d7e6f5a41")  # session id = uuid5(NAMESPACE, ActionId)
 FINISHED = ("finished", "failed", "interrupted")
-REDACT = re.compile(r"(sk-[A-Za-z0-9_-]{4,}|ghp_[A-Za-z0-9]{4,}|xox[bp]-[A-Za-z0-9-]{4,}|Bearer\s+[A-Za-z0-9._-]{4,})")
+REDACT = re.compile(
+    r"-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----.*?(?:-----END [A-Z0-9 ]*PRIVATE KEY-----|\Z)"  # PEM private key blocks (an unterminated one to the end)
+    r"|sk-[A-Za-z0-9_-]{4,}"  # OpenAI / Anthropic (`sk-ant-...`)
+    r"|(?:ghp|gho|ghs|ghu)_[A-Za-z0-9]{4,}|github_pat_[A-Za-z0-9_]{4,}"  # GitHub
+    r"|xox[bpa]-[A-Za-z0-9-]{4,}|xapp-[A-Za-z0-9-]{4,}"  # Slack
+    r"|Bearer\s+[A-Za-z0-9._~+/=-]{4,}"
+    r"|AKIA[0-9A-Z]{16}",  # AWS access key id
+    re.DOTALL)
 BACKOFF_CAP = 8  # retry backoff doubles per retry up to retry_backoff * BACKOFF_CAP
+# What a worker may keep of the driver's environment: the credentials its own CLI authenticates with.
+WORKER_CREDENTIALS = {"claude": ("ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "CLAUDE_CODE_OAUTH_TOKEN"), "codex": ("OPENAI_API_KEY", "CODEX_API_KEY")}
+SECRET_ENV = re.compile(r"^(FRIDICA_.*|SLACK_.*|GH_TOKEN|GITHUB_TOKEN|.*_TOKEN|.*_SECRET|.*_API_KEY)$")
+
+
+def worker_env(environ, worker: str) -> dict[str, str]:
+    """The driver's environment without board, Slack, fridica or other secrets; the worker CLI's own credentials stay."""
+    keep = WORKER_CREDENTIALS.get(worker, ())
+    return {k: v for k, v in environ.items() if k in keep or not SECRET_ENV.match(k)}
+
+
+def write_redacted(path: Path, text: str):
+    """Every file the backend writes goes through here (the journal has its own locked append)."""
+    path.write_text(REDACT.sub("[redacted]", text))
 
 
 def redact(v):
@@ -106,11 +137,13 @@ class Journal:
             chunk = f.read().rstrip(b"\n")
             return json.loads(chunk.rsplit(b"\n", 1)[-1]) if chunk else None
 
-    def append(self, line: dict, now: float | None = None) -> dict:
-        """Write one redacted line with the next `seq`; `now` assigns the next fixed-width `ts` when the line has none."""
+    def append(self, line: dict, now: float | None = None, check: Callable[[list[dict]], None] | None = None) -> dict:
+        """Write one redacted line with the next `seq`; `now` assigns the next fixed-width `ts` when the line has none.
+        `check(rows)` runs inside the lock before the write and may raise to refuse it (the cost ceiling)."""
         with self._mutex, self.lock_path.open("a+") as lock:
             fcntl.flock(lock, fcntl.LOCK_EX)
             try:
+                if check is not None: check(self.all())
                 last = self._tail()
                 seq = (int(last["seq"]) if last else 0) + 1
                 line = redact(dict(line))
@@ -152,15 +185,27 @@ def ts_pair(ts: str) -> tuple[int, int]:
 
 
 class ProcessRunner:
-    """The default runner: a new session per worker so the whole process group dies at the deadline (`os.killpg`)."""
+    """The default runner: a new session per worker so the whole process group dies at the deadline (`os.killpg`).
 
-    def __init__(self):
+    `env` is the worker's (scrubbed) environment; `on_spawn(argv, pgid)` is told the group id as soon as the process exists.
+    A `kill` that arrives before the process was started is remembered and applied right after the start."""
+
+    def __init__(self, env: dict[str, str] | None = None, on_spawn: Callable[[list[str], int], None] | None = None):
+        self.env, self.on_spawn = env, on_spawn
         self.procs: dict[tuple[str, ...], subprocess.Popen] = {}
+        self.killed: set[tuple[str, ...]] = set()
+        self._lock = threading.Lock()
 
     def __call__(self, argv: list[str], cwd: str, timeout: float) -> tuple[str, int | None]:
-        p = subprocess.Popen(argv, cwd=cwd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, start_new_session=True)
         key = tuple(argv)
-        self.procs[key] = p
+        with self._lock:
+            p = subprocess.Popen(argv, cwd=cwd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, start_new_session=True, env=self.env)
+            self.procs[key] = p
+            if key in self.killed: self.killpg(p)
+        if self.on_spawn:
+            try: self.on_spawn(argv, p.pid)  # start_new_session: the group id is the pid
+            except Exception as e:  # noqa: BLE001 - bookkeeping must not orphan the worker
+                log.warning("on_spawn failed: %s", e)
         try:
             out, err = p.communicate(timeout=timeout)
         except subprocess.TimeoutExpired:
@@ -169,7 +214,9 @@ class ProcessRunner:
             log.warning("worker killed at the deadline (%.0f s): %s", timeout, argv[0])
             return out or "", None
         finally:
-            self.procs.pop(key, None)
+            with self._lock:
+                self.procs.pop(key, None)
+                self.killed.discard(key)
         if p.returncode: log.warning("worker %s exited %s: %s", argv[0], p.returncode, (err or "")[-300:])
         return out or "", p.returncode
 
@@ -179,8 +226,15 @@ class ProcessRunner:
         except (ProcessLookupError, PermissionError): pass
 
     def kill(self, argv: list[str]):
-        p = self.procs.get(tuple(argv))
-        if p: self.killpg(p)
+        key = tuple(argv)
+        with self._lock:
+            p = self.procs.get(key)
+            if p: self.killpg(p)
+            else: self.killed.add(key)
+
+    def forget(self, argv: list[str]):
+        """The call for `argv` returned: a kill remembered for it must not hit a later run of the same argv."""
+        with self._lock: self.killed.discard(tuple(argv))
 
 
 class BootstrapBackend:
@@ -189,12 +243,13 @@ class BootstrapBackend:
         self.dir = Path(os.path.expanduser(self.b.journal_dir))
         self.journal = Journal(self.dir)
         self.worktrees = Path(os.path.expanduser(self.b.worktrees_dir)) if self.b.worktrees_dir else self.dir / "worktrees"
-        for d in ("results", "sessions", "workers", "prompts"): (self.dir / d).mkdir(parents=True, exist_ok=True)
-        self.runner = runner or ProcessRunner()
+        for d in ("results", "sessions", "workers", "runs"): (self.dir / d).mkdir(parents=True, exist_ok=True)
+        self.runner = runner or ProcessRunner(env=worker_env(os.environ, self.b.worker), on_spawn=self._spawned)
         self.done: queue.Queue = queue.Queue()
         self.threads: dict[str, threading.Thread] = {}
-        self.jobs: dict[str, dict] = {}  # job_id -> the job line (running or stopped)
+        self.jobs: dict[str, dict] = {}  # job_id -> the job line (running, stopped, or an orphan of a crashed driver)
         self.drivers: dict[str, str] = {}
+        self._lock = threading.Lock()  # a job's stopped / launched / ran flags (stop() against the worker thread)
         self._recover()
 
     # -- journal helpers -----------------------------------------------------------
@@ -207,18 +262,56 @@ class BootstrapBackend:
         if thread is None: return rows
         return [r for r in rows if r.get("thread") and f"{r.get('workspace')}:{r['channel']['id']}:{r['thread']}" == thread]
 
-    def spent(self) -> float:
-        return round(sum(float(r.get("total_cost_usd") or 0) for r in self.journal.all() if r.get("kind") == "job_result"), 6)
+    def spent(self, rows: list[dict] | None = None) -> float:
+        """The finished jobs' `total_cost_usd` over the journal."""
+        rows = self.journal.all() if rows is None else rows
+        return round(sum(float(r.get("total_cost_usd") or 0) for r in rows if r.get("kind") == "job_result"), 6)
+
+    def reserved(self, rows: list[dict] | None = None) -> float:
+        """The per-job budget held for every job still in flight (a job line without its job_result); its result releases it to the actual cost."""
+        rows = self.journal.all() if rows is None else rows
+        done = {r["job_id"] for r in rows if r.get("kind") == "job_result"}
+        return round(sum(float(r.get("reserved_usd", self.b.max_budget_usd_per_job)) for r in rows if r.get("kind") == "job" and r["job_id"] not in done), 6)
+
+    def _check_budget(self, aid: str, rows: list[dict]):
+        spent, reserved, new = self.spent(rows), self.reserved(rows), self.b.max_budget_usd_per_job
+        if spent + reserved + new > self.b.max_cost_usd_per_study:
+            log.warning("delegate %s refused: %.2f USD spent, %.2f reserved in flight, %.2f per job, ceiling %.2f", aid, spent, reserved, new, self.b.max_cost_usd_per_study)
+            raise ControlError(429, "budget_exceeded")
 
     def _recover(self):
-        """Job lines without a result line: a result file written before the crash is appended now; the rest is the stage timer's."""
+        """Job lines without a result line: a result file written before the crash is appended now; the rest is the stage timer's.
+        A worker that outlived the crashed driver past its deadline (`runs/`) has its process group killed."""
         rows = self.journal.all()
         results = {r["job_id"] for r in rows if r.get("kind") == "job_result"}
         for r in rows:
             if r.get("kind") == "job" and r["job_id"] not in results:
                 f = self.dir / "results" / f"{action_key(r['action_id'])}.json"
                 if f.exists(): self._record(r, json.loads(f.read_text()))
-                else: self.jobs[r["job_id"]] = {**r, "stopped": True}  # no process to adopt; the stage timer retries (rule R)
+                else: self.jobs[r["job_id"]] = {**r, "stopped": True, "orphan": True}  # no process to adopt; the stage timer retries (rule R)
+        self._kill_overdue()
+
+    def _spawned(self, argv: list[str], pgid: int):
+        """ProcessRunner's start notice: the worker's process group and absolute deadline, durable for a restarted driver."""
+        job = next((j for j in list(self.jobs.values()) if j.get("argv") == argv), None)
+        if job is None: return
+        run = {"job_id": job["job_id"], "action_id": job["action_id"], "pgid": pgid, "deadline": self.clock() + float(job["timeout"])}
+        write_redacted(self.dir / "runs" / f"{action_key(job['action_id'])}.json", json.dumps(run, sort_keys=True))
+
+    def _kill_overdue(self):
+        """Orphaned workers (their driver died) past their deadline: kill the process group, drop the run file."""
+        now = self.clock()
+        for job in list(self.jobs.values()):
+            if not job.get("orphan"): continue
+            f = self.dir / "runs" / f"{action_key(job['action_id'])}.json"
+            if not f.exists(): continue
+            try: run = json.loads(f.read_text())
+            except ValueError: continue
+            if float(run.get("deadline", 0)) > now: continue
+            try: os.killpg(int(run["pgid"]), signal.SIGKILL)
+            except (ProcessLookupError, PermissionError, KeyError, ValueError): pass
+            log.warning("killed the overdue worker group %s of %s (driver restarted)", run.get("pgid"), job["job_id"])
+            f.unlink(missing_ok=True)
 
     # -- DriverBackend -----------------------------------------------------------------
     def set_driver(self, thread: str, mode: str) -> dict:
@@ -240,6 +333,7 @@ class BootstrapBackend:
 
     def events(self, after: int | None, limit: int = 1000) -> dict:
         self.reap()
+        self._kill_overdue()
         start = int(after or 0)  # None: a fresh store; the journal is this driver's own record, so it is read from line 1
         page = self.journal.read(start, limit)
         return {"v": 1, "events": page, "next": page[-1]["cursor"] if page else start, "scanned": len(page)}
@@ -253,33 +347,46 @@ class BootstrapBackend:
         return {"session": {"control": "active"}, "messages": messages, "jobs": list(jobs.values())}
 
     def stop(self, thread: str, worker_id: str, mode: str = "owner") -> dict:
+        """Kill the worker (or keep a retry still in its backoff from launching); its interrupted line, with the cost the
+        worker reported, is appended when its thread returns (`reap`)."""
         for job in list(self.jobs.values()):
             if job["worker_id"] == worker_id and not job.get("stopped") and job.get("thread_id") == thread:
-                job["stopped"] = True
-                kill = getattr(self.runner, "kill", None)
-                if kill: kill(job["argv"])
-                self._record(job, {"job_status": "interrupted", "code": "stopped", "result": None, "total_cost_usd": 0.0, "session_id": job["session_id"]})
+                with self._lock:
+                    job["stopped"] = True
+                    kill = getattr(self.runner, "kill", None)
+                    if kill and job.get("launched") and not job.get("ran"): kill(job["argv"])
         return {"ok": True}
+
+    def release(self, thread: str) -> dict:
+        """The study in `thread` reached a terminal stage: remove its workers' worktrees (`git worktree remove --force`)."""
+        busy = {j["worker_id"] for j in self.jobs.values() if j.get("thread_id") not in (None, thread) and not j.get("stopped")}
+        removed = []
+        for wid in dict.fromkeys(r["worker_id"] for r in self.lines(thread) if r.get("kind") == "job"):
+            path = self.worktrees / wid
+            if wid in busy or not path.exists(): continue
+            if self.b.subject_repo:
+                p = subprocess.run(["git", "-C", os.path.expanduser(self.b.subject_repo), "worktree", "remove", "--force", str(path)], capture_output=True, text=True)
+                if p.returncode:
+                    log.warning("worktree remove %s: %s", path, p.stderr.strip()[:200])
+                    continue
+            else: shutil.rmtree(path, ignore_errors=True)
+            removed.append(wid)
+        return {"removed": removed}
 
     def delegate(self, thread: str, req: contracts.DelegateRequest) -> dict:
         aid = req.tags[0] if req.tags else (contracts.ref_of(req.brief) or "")
         if not aid: raise ControlError(400, "missing_ref")
-        spent = self.spent()
-        if spent + self.b.max_budget_usd_per_job > self.b.max_cost_usd_per_study:
-            log.warning("delegate %s refused: %.2f USD spent, %.2f per job, ceiling %.2f", aid, spent, self.b.max_budget_usd_per_job, self.b.max_cost_usd_per_study)
-            raise ControlError(429, "budget_exceeded")
+        self._check_budget(aid, self.journal.all())  # before any side effect; re-checked inside the journal lock below
         n = sum(1 for r in self.journal.all() if r.get("kind") == "job") + 1
         worker_id = req.worker_id or f"w-{n}"
         session_id, resume, attempt = self._session(aid, worker_id, req.role)
         cwd = self.worktree(worker_id)
         timeout = OVERRUN_FACTOR * self.cfg.projection.get(stage_of(aid) or "", self.cfg.stage_timeout)
-        prompt_file = self.dir / "prompts" / f"{action_key(aid)}.md"
-        prompt_file.write_text(req.brief)
         argv, aux = self.argv(req.role, req.brief, session_id, resume, str(cwd), aid)
         line = {"kind": "job", "action": "started", **self.place(thread), "job_id": f"job-{n}", "worker_id": worker_id, "role": req.role, "attempt": attempt, "inbox_id": f"grp-{n}",
-                "tags": list(req.tags), "action_id": aid, "brief": req.brief, "session_id": session_id, "resume": resume, "backend": self.b.worker, "cwd": str(cwd), "timeout": timeout, "time": self.clock()}
-        self.journal.append(line)
-        job = {**line, "thread_id": thread, "argv": argv, "aux": aux, "stopped": False}
+                "tags": list(req.tags), "action_id": aid, "brief": req.brief, "session_id": session_id, "resume": resume, "backend": self.b.worker, "cwd": str(cwd), "timeout": timeout, "reserved_usd": self.b.max_budget_usd_per_job, "time": self.clock()}
+        self.journal.append(line, check=lambda rows: self._check_budget(aid, rows))  # spent + reserved + this job <= ceiling, atomically
+        job = {**line, "thread_id": thread, "argv": argv, "aux": aux, "stopped": False, "launched": False, "ran": False}
         self.jobs[job["job_id"]] = job
         delay = min(self.b.retry_backoff * 2 ** (attempt - 2), self.b.retry_backoff * BACKOFF_CAP) if attempt > 1 else 0.0
         t = threading.Thread(target=self._run, args=(job, delay), name=f"worker-{job['job_id']}", daemon=True)
@@ -296,8 +403,8 @@ class BootstrapBackend:
         if seen: session_id, resume, attempt = seen["session_id"], True, int(seen["attempts"]) + 1
         elif worker and worker.get("session_id"): session_id, resume, attempt = worker["session_id"], True, 1
         else: session_id, resume, attempt = str(uuid.uuid5(NAMESPACE, aid)), False, 1
-        sf.write_text(json.dumps({"action_id": aid, "session_id": session_id, "worker_id": worker_id, "attempts": attempt}))
-        wf.write_text(json.dumps({"worker_id": worker_id, "role": role, "session_id": session_id}))
+        write_redacted(sf, json.dumps({"action_id": aid, "session_id": session_id, "worker_id": worker_id, "attempts": attempt}))
+        write_redacted(wf, json.dumps({"worker_id": worker_id, "role": role, "session_id": session_id}))
         return session_id, resume, attempt
 
     def worktree(self, worker_id: str) -> Path:
@@ -333,17 +440,30 @@ class BootstrapBackend:
     # -- the worker thread and its result -------------------------------------------------
     def _run(self, job: dict, delay: float):
         if delay: self.sleep(delay)
+        with self._lock:  # the lock stop() takes: a retry stopped during its backoff never launches
+            if job["stopped"]:
+                self.done.put((job["job_id"], {"session_id": job["session_id"], "total_cost_usd": 0.0, "result": None, "code": "stopped", "job_status": "interrupted"}))
+                return
+            job["launched"] = True
         try: stdout, rc = self.runner(job["argv"], job["cwd"], job["timeout"])
         except Exception as e:  # noqa: BLE001 - a runner crash is a failed job, not a dead driver
             stdout, rc = "", f"runner: {e}"[:200]
+        with self._lock:
+            job["ran"] = True
+            forget = getattr(self.runner, "forget", None)
+            if forget: forget(job["argv"])
         outcome = self.outcome(job, stdout, rc)
-        (self.dir / "results" / f"{action_key(job['action_id'])}.json").write_text(json.dumps(redact(outcome), sort_keys=True))  # durable before the journal line
+        if job["aux"].get("last_message") and Path(job["aux"]["last_message"]).exists():  # codex's own file: redacted in place
+            f = Path(job["aux"]["last_message"])
+            write_redacted(f, f.read_text())
+        write_redacted(self.dir / "results" / f"{action_key(job['action_id'])}.json", json.dumps(redact(outcome), sort_keys=True))  # durable before the journal line
+        (self.dir / "runs" / f"{action_key(job['action_id'])}.json").unlink(missing_ok=True)
         self.done.put((job["job_id"], outcome))
 
     def outcome(self, job: dict, stdout: str, rc) -> dict:
         """The worker's exit -> job_status, code, WorkerResult (machine_state from the worktree, not the model) and cost."""
         base = {"session_id": job["session_id"], "total_cost_usd": 0.0, "result": None, "code": None}
-        if rc is None: return {**base, "job_status": "interrupted", "code": "timeout"}
+        if rc is None: return {**base, "job_status": "interrupted", "code": "timeout", "total_cost_usd": cost_of(stdout)}  # killed: whatever cost it reported
         if isinstance(rc, str): return {**base, "job_status": "failed", "code": rc}
         if rc: return {**base, "job_status": "failed", "code": f"exit {rc}", "total_cost_usd": cost_of(stdout)}
         payload, cost, code = None, 0.0, None
@@ -376,7 +496,9 @@ class BootstrapBackend:
             try: job_id, outcome = self.done.get_nowait()
             except queue.Empty: return
             job = self.jobs.get(job_id)
-            if job is None or job.get("stopped"): continue  # stopped: its interrupted line is already in the journal
+            if job is None: continue
+            if job.get("stopped"):  # stopped by the driver: interrupted, at the cost the worker reported
+                outcome = {**outcome, "job_status": "interrupted", "code": "stopped", "result": None}
             job["stopped"] = True
             self._record(job, outcome)
 

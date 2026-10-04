@@ -211,7 +211,7 @@ and the churn policy are in `tests/bootstrap/README.md`.
 
 The driver talks to the world through one `DriverBackend` (`backend/protocol.py`), shaped like
 the feed it already polls: `delegate`, `stop`, `post`, `events`, `thread_view`, `set_driver`,
-no `wait()`. `[backend] kind` in `research.toml` picks it; the loop, `translate`, the timers and
+and `release` when a study reaches Delivered or Stopped; no `wait()`. `[backend] kind` in `research.toml` picks it; the loop, `translate`, the timers and
 the restart probe are the same over either.
 
 - `fridica` (`backend/fridica.py`): the pinned #126 PR B routes over the control socket, one
@@ -236,10 +236,21 @@ the restart probe are the same over either.
   deterministic sessions (`uuid5(ActionId)` as the claude session id, `--resume` for a
   re-sent ActionId or a resumed worker id, never a duplicate); bounds (process-group kill at
   2x the stage projection, exponential backoff before a retry of a seen ActionId,
-  `max_budget_usd_per_job` per worker and `max_cost_usd_per_study` on the sum of
-  `total_cost_usd` over the journal: a delegate past it is refused with `budget_exceeded`,
-  which rule R turns into Blocked); redaction (`sk-`, `ghp_`, `xoxb-`/`xoxp-`, `Bearer`
-  tokens never reach the journal or the result files). Swap-equivalence: corpus
+  a retry stopped during its backoff never launches, `max_budget_usd_per_job` per worker and
+  `max_cost_usd_per_study` on the finished jobs' `total_cost_usd` plus a
+  `max_budget_usd_per_job` reservation per job in flight, checked inside the journal lock and
+  released to the actual cost by the job's result: a delegate past it is refused with
+  `budget_exceeded`, which rule R turns into Blocked; codex reports no cost, so a ceiling with
+  `worker = "codex"` is a config error; each worker's process group and absolute deadline are
+  kept in `runs/` and a restarted backend kills the overdue groups of jobs that never
+  reported); a study's worktrees are removed when it reaches Delivered or Stopped (the
+  backend's `release`); redaction (`sk-`/`sk-ant-`, `ghp_`/`gho_`/`ghs_`/`ghu_`/`github_pat_`,
+  `xoxb-`/`xoxp-`/`xoxa-`/`xapp-`, `Bearer`, `AKIA` key ids and PEM private key blocks never
+  reach any file the backend writes: the journal, `results/` including codex's last-message
+  file, `sessions/`, `workers/`, `runs/`; the brief is kept only in the journal line); workers
+  run with a scrubbed environment (no `FRIDICA_*`, `SLACK_*`, `GH_TOKEN`, `GITHUB_TOKEN`, or
+  other `*_TOKEN`/`*_SECRET`/`*_API_KEY`, except the worker CLI's own credentials).
+  Swap-equivalence: corpus
   `000_bootstrap` driven through the bootstrap backend with a fake claude yields the same
   action sequence as through the fake control server. The bootstrap backend is frozen after
   the promotion of R2: no new features, the fridica backend takes over.

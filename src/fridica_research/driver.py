@@ -120,6 +120,7 @@ class Driver:
     # -- one event through the machine ---------------------------------------------
     def apply(self, thread: str, ev: Event, cursor: int | None = None) -> State:
         state = self.store.load(thread)
+        was_terminal = state is not None and state.stage in machine.TERMINAL
         if ev.kind == "started":
             if state is not None: return state
             state, actions = machine.start(thread, ev["channel"], ev["problem"], ev.now, generation=ev["generation"], lineage=ev["lineage"], spawner=ev["spawner"], projected_hours=ev["projected_hours"], cfg=self.cfg)
@@ -129,6 +130,9 @@ class Driver:
         for a in actions: log.info("%s %s %s", thread, a.kind, a.id)
         for follow in [x for a in actions for x in self.execute(state, a)]:
             state = self.apply(thread, follow)
+        if state.stage in machine.TERMINAL and not was_terminal:
+            try: self.backend.release(thread)
+            except ControlError as e: log.warning("release %s failed: %s", thread, e)
         return state
 
     def execute(self, state: State, a: Action) -> list[Event]:

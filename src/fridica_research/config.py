@@ -153,6 +153,8 @@ def _backend(b: dict) -> Backend:
     if kind not in ("fridica", "bootstrap"): raise ValueError(f"[backend] kind must be fridica or bootstrap, not {kind!r}")
     bs = b.get("bootstrap", {})
     if str(bs.get("worker", "claude")) not in ("claude", "codex"): raise ValueError("[backend.bootstrap] worker must be claude or codex")
+    if str(bs.get("worker", "claude")) == "codex" and "max_cost_usd_per_study" in bs:
+        raise ValueError("[backend.bootstrap] max_cost_usd_per_study cannot be enforced with worker = \"codex\": codex reports no cost, so the ceiling would never trip; remove it or use worker = \"claude\"")
     d = Bootstrap()
     return Backend(kind, Bootstrap(
         journal_dir=str(bs.get("journal_dir", d.journal_dir)), worktrees_dir=str(bs.get("worktrees_dir", "")), worker=str(bs.get("worker", "claude")),

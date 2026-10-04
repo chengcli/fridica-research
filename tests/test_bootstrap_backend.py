@@ -755,15 +755,16 @@ def test_the_scrub_drops_the_board_token_and_cloud_database_and_agent_secrets(tm
     env = {"PATH": os.environ["PATH"], "HOME": "/h", "BOARD_PAT": "b", "AWS_SECRET_ACCESS_KEY": "a", "AWS_ACCESS_KEY_ID": "a", "AWS_PROFILE": "p", "PGPASSWORD": "x", "DB_PASSWORD": "p",
            "SMTP_PASS": "p", "GOOGLE_APPLICATION_CREDENTIALS": "/c", "SSH_AUTH_SOCK": "/s", "GPG_AGENT_SOCK": "/g", "DATABASE_URL": "postgres://u:p@h/d", "SIGNING_KEY": "k",
            "ANTHROPIC_API_KEY": "a", "CLAUDE_CODE_OAUTH_TOKEN": "o", "OPENAI_API_KEY": "x"}
-    assert set(worker_env(env, "claude", drop=("BOARD_PAT",))) == {"PATH", "HOME", "ANTHROPIC_API_KEY", "CLAUDE_CODE_OAUTH_TOKEN"}
-    assert set(worker_env(env, "codex", drop=("BOARD_PAT",))) == {"PATH", "HOME", "OPENAI_API_KEY"}
+    kept = {"PATH", "HOME", "AWS_PROFILE", "GOOGLE_APPLICATION_CREDENTIALS"}  # non-secret provider settings (iteration 3d)
+    assert set(worker_env(env, "claude", drop=("BOARD_PAT",))) == kept | {"ANTHROPIC_API_KEY", "CLAUDE_CODE_OAUTH_TOKEN"}
+    assert set(worker_env(env, "codex", drop=("BOARD_PAT",))) == kept | {"OPENAI_API_KEY"}
     # The default runner drops the board's token_env by name, whatever it is called.
     for k, v in env.items(): monkeypatch.setenv(k, v)
     cfg = bootstrap_cfg(tmp_path, dataclasses.replace(CFG, board=dataclasses.replace(CFG.board, token_env="BOARD_PAT")))
     out, rc = BootstrapBackend(cfg, sleep=lambda s: None).runner(["sh", "-c", "env"], str(tmp_path), 5)
     names = {line.split("=", 1)[0] for line in out.splitlines()}
     assert rc == 0 and {"ANTHROPIC_API_KEY", "CLAUDE_CODE_OAUTH_TOKEN"} <= names
-    assert not names & {"BOARD_PAT", "PGPASSWORD", "AWS_SECRET_ACCESS_KEY", "AWS_ACCESS_KEY_ID", "AWS_PROFILE", "DB_PASSWORD", "SMTP_PASS", "GOOGLE_APPLICATION_CREDENTIALS", "SSH_AUTH_SOCK", "DATABASE_URL", "SIGNING_KEY"}
+    assert not names & {"BOARD_PAT", "PGPASSWORD", "AWS_SECRET_ACCESS_KEY", "AWS_ACCESS_KEY_ID", "DB_PASSWORD", "SMTP_PASS", "SSH_AUTH_SOCK", "DATABASE_URL", "SIGNING_KEY"}
 
 
 def test_redaction_leaves_prose_alone_and_covers_more_prefixes():
@@ -889,3 +890,151 @@ def test_release_keeps_a_worktree_with_a_running_job_until_it_ends(tmp_path):
     backend.join(10)
     backend.events(0)
     assert not wt.exists()
+
+
+# -- review fixes (iteration 3d): each behavioural one fails on a45db19 ---------------------------------
+@pytest.mark.parametrize("answer", [("", -9), ("", 1), ('{"type":"result","total_cost_usd":0.4,"structured_output":{"sta', 0)], ids=["signal", "crash", "truncated"])
+def test_a_launched_job_that_failed_without_a_cost_is_charged_its_reservation(tmp_path, answer):
+    """B1: killed by a signal not from stop, a nonzero exit, or rc 0 with truncated output: no parseable cost, so the job is
+    charged its full reservation, and with ceiling 5 and 5 per job the second delegate is refused."""
+    backend = BootstrapBackend(bootstrap_cfg(tmp_path, max_budget_usd_per_job=5.0, max_cost_usd_per_study=5.0), runner=lambda a, c, t: answer, sleep=lambda s: None)
+    explore(backend, 1)
+    with pytest.raises(ControlError) as e: explore(backend, 2)
+    assert (e.value.status, e.value.code) == (429, "budget_exceeded")
+    jr = [r for r in backend.journal.all() if r["kind"] == "job_result"]
+    assert [(r["job_status"], r["total_cost_usd"]) for r in jr] == [("failed", 5.0)] and (backend.spent(), backend.reserved()) == (5.0, 0.0)
+
+
+def test_a_failed_job_with_a_reported_cost_and_a_launch_error_are_not_charged_the_reservation(tmp_path):
+    """B1's boundary: a failed job that reported its cost is charged that cost; a runner that never launched is charged nothing."""
+    answers = iter([('{"type":"result","is_error":true,"total_cost_usd":0.3}', 0), ("", "runner: no such file")])
+    def runner(a, c, t):
+        out, rc = next(answers)
+        if isinstance(rc, str): raise FileNotFoundError("claude")
+        return out, rc
+    backend = BootstrapBackend(bootstrap_cfg(tmp_path, max_budget_usd_per_job=5.0, max_cost_usd_per_study=50.0), runner=runner, sleep=lambda s: None)
+    explore(backend, 1)
+    explore(backend, 2)
+    jr = [r for r in backend.journal.all() if r["kind"] == "job_result"]
+    assert [(r["code"], r["total_cost_usd"]) for r in jr] == [("is_error", 0.3), ("runner: claude", 0.0)]
+
+
+@pytest.mark.parametrize("value", ["nan", "-1", "-inf", "inf"])
+def test_a_non_finite_or_negative_ceiling_is_a_config_error(value):
+    """B2: nan, a negative or an infinite ceiling would turn the check off silently."""
+    with pytest.raises(ValueError, match="max_cost_usd_per_study must be a finite number"):
+        config.parse(f'[backend]\nkind = "bootstrap"\n[backend.bootstrap]\nmax_cost_usd_per_study = {value}\n')
+    with pytest.raises(ValueError, match="max_budget_usd_per_job must be a finite number"):
+        config.parse(f'[backend]\nkind = "bootstrap"\n[backend.bootstrap]\nmax_budget_usd_per_job = {value}\n')
+
+
+def test_exactly_zero_is_no_ceiling_at_load():
+    c = config.parse('[backend]\nkind = "bootstrap"\n[backend.bootstrap]\nmax_cost_usd_per_study = 0\n')
+    assert c.backend.bootstrap.max_cost_usd_per_study == 0
+
+
+def test_redaction_catches_a_key_after_an_underscore():
+    """L1: `KEY_sk-proj-...` is redacted; "risk-based" is not."""
+    assert redact_one("KEY_sk-proj-abcd1234") == "KEY_[redacted]"
+    assert redact_one("a risk-based plan") == "a risk-based plan"
+
+
+def test_bedrock_and_vertex_settings_and_keep_env_survive_the_scrub(tmp_path, monkeypatch):
+    """L2: the non-secret provider settings stay by default, `keep_env` keeps more by name, a secret still goes."""
+    provider = {"AWS_REGION": "us-east-1", "AWS_DEFAULT_REGION": "us-east-1", "AWS_PROFILE": "p", "GOOGLE_APPLICATION_CREDENTIALS": "/c.json",
+                "CLAUDE_CODE_USE_BEDROCK": "1", "CLAUDE_CODE_USE_VERTEX": "1", "CLOUD_ML_REGION": "us-east5", "ANTHROPIC_VERTEX_PROJECT_ID": "proj"}
+    env = {"PATH": os.environ["PATH"], **provider, "AWS_SECRET_ACCESS_KEY": "s", "AWS_SESSION_TOKEN": "t", "MY_PROXY_TOKEN": "m", "GH_TOKEN": "g"}
+    assert set(worker_env(env, "claude")) == {"PATH", *provider}
+    assert set(worker_env(env, "claude", keep_env=("MY_PROXY_TOKEN",))) == {"PATH", "MY_PROXY_TOKEN", *provider}
+    c = config.parse('[backend]\nkind = "bootstrap"\n[backend.bootstrap]\nkeep_env = ["MY_PROXY_TOKEN"]\n')
+    assert c.backend.bootstrap.keep_env == ("MY_PROXY_TOKEN",) and config.Config.from_dict(json.loads(json.dumps(c.to_dict()))) == c
+    with pytest.raises(ValueError, match="keep_env"): config.parse('[backend]\nkind = "bootstrap"\n[backend.bootstrap]\nkeep_env = "X"\n')
+    for k, v in env.items(): monkeypatch.setenv(k, v)
+    cfg = dataclasses.replace(c, state_path=str(tmp_path / "s.sqlite3"), backend=config.Backend("bootstrap", dataclasses.replace(c.backend.bootstrap, journal_dir=str(tmp_path / "journal"))))
+    out, rc = BootstrapBackend(cfg, sleep=lambda s: None).runner(["sh", "-c", "env"], str(tmp_path), 5)  # the default runner
+    names = {line.split("=", 1)[0] for line in out.splitlines()}
+    assert rc == 0 and {"MY_PROXY_TOKEN", *provider} <= names and not names & {"AWS_SECRET_ACCESS_KEY", "AWS_SESSION_TOKEN", "GH_TOKEN"}
+
+
+def live_orphan(cfg, aid="t/g1/i1/Explore/a1/explorer"):
+    """A driver that died with attempt 1 of `aid` running: a real process group recorded in `runs/` with its start time."""
+    gate, procs = threading.Event(), []
+    b1 = BootstrapBackend(cfg, clock=Clock(1000.0), sleep=lambda s: None, runner=lambda a, c, t: ("", None))
+    def runner(argv, cwd, timeout):
+        p = subprocess.Popen(["sh", "-c", "sleep 30 & sleep 30"], start_new_session=True)
+        procs.append(p)
+        b1._spawned(argv, p.pid)
+        gate.wait(20)
+        return "", None
+    b1.runner = runner
+    b1.delegate("journal:C1:1.000000", explorer_req(aid))
+    runs = Path(cfg.backend.bootstrap.journal_dir) / "runs"
+    deadline = time.monotonic() + 10
+    while not list(runs.glob("*.json")) and time.monotonic() < deadline: time.sleep(0.01)
+    def cleanup():
+        for p in procs:
+            try: os.killpg(p.pid, 9)
+            except (ProcessLookupError, PermissionError): pass  # already reaped
+            p.wait(5)
+        gate.set()
+        b1.join(10)
+    return procs, cleanup
+
+
+def test_release_keeps_the_worktree_of_a_live_orphan(tmp_path):
+    """L3: a run file whose group is alive per the start-time check is skipped like a running job; removed once it is gone."""
+    cfg = bootstrap_cfg(tmp_path, dataclasses.replace(CFG, projection={**CFG.projection, "explore": 100}))
+    procs, cleanup = live_orphan(cfg)
+    try:
+        b2 = BootstrapBackend(cfg, clock=Clock(1100.0), sleep=lambda s: None, runner=lambda a, c, t: ("", None))
+        wt = Path(cfg.backend.bootstrap.journal_dir) / "worktrees" / "w-1"
+        assert b2.jobs["job-1"]["orphan"] and wt.exists()
+        assert b2.release("journal:C1:1.000000") == {"removed": []} and wt.exists() and procs[0].poll() is None
+        b2.clock = Clock(1201.0)
+        b2.events(0)  # past the deadline: the orphan's group is killed, then its worktree goes
+        assert procs[0].wait(5) == -9 and not wt.exists()
+    finally:
+        cleanup()
+
+
+def test_a_retry_waits_for_a_live_orphan_of_the_same_action_id(tmp_path):
+    """L4: after a crash the retry of an ActionId whose orphan still runs does not launch (two workers would `--resume` one session)."""
+    cfg = bootstrap_cfg(tmp_path)
+    procs, cleanup = live_orphan(cfg)
+    try:
+        polls, launched = [], []
+        def sleep(s):
+            polls.append(s)
+            if len(polls) == 3:  # the orphan ends (killed by the owner, or done)
+                os.killpg(procs[0].pid, 9)
+                procs[0].wait(5)
+        def runner(argv, cwd, timeout):
+            launched.append(procs[0].poll())
+            return claude_json(payload(result(report="r")), argv), 0
+        b2 = BootstrapBackend(cfg, runner=runner, clock=Clock(1100.0), sleep=sleep)  # before the orphan's deadline
+        assert b2.jobs["job-1"]["orphan"]
+        b2.delegate("journal:C1:1.000000", explorer_req("t/g1/i1/Explore/a1/explorer"))  # attempt 2: --resume of the same session
+        b2.join(10)
+        assert launched == [-9] and len(polls) == 3  # launched only after the orphan was gone
+    finally:
+        cleanup()
+
+
+def test_a_retry_waiting_for_a_live_orphan_can_be_stopped(tmp_path):
+    cfg = bootstrap_cfg(tmp_path)
+    procs, cleanup = live_orphan(cfg)
+    try:
+        launched, waiting = [], threading.Event()
+        def sleep(s):
+            waiting.set()
+            time.sleep(0.01)
+        b2 = BootstrapBackend(cfg, runner=lambda a, c, t: (launched.append(a), ("", 0))[1], clock=Clock(1100.0), sleep=sleep)
+        r = b2.delegate("journal:C1:1.000000", explorer_req("t/g1/i1/Explore/a1/explorer"))
+        assert waiting.wait(10)
+        b2.stop("journal:C1:1.000000", r["jobs"][0]["worker_id"])
+        b2.join(10)
+        b2.events(0)
+        jr = [x for x in b2.journal.all() if x["kind"] == "job_result"]
+        assert not launched and [(x["attempt"], x["code"]) for x in jr] == [(2, "stopped")] and procs[0].poll() is None
+    finally:
+        cleanup()

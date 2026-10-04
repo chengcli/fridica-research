@@ -1,6 +1,7 @@
 """research.toml: the driver's configuration (stdlib tomllib)."""
 from __future__ import annotations
 
+import math
 import os
 import re
 import tomllib
@@ -57,6 +58,7 @@ class Bootstrap:
     permission_mode: str = "bypassPermissions"  # claude --permission-mode for an unattended worker in its worktree
     roles_dir: str = ""  # `<roles_dir>/<role>.md` is appended to the worker's system prompt when present (R5)
     retry_backoff: float = 30.0  # seconds before a re-delegate of a seen ActionId starts; doubles per retry, capped at 8x
+    keep_env: tuple[str, ...] = ()  # more environment variables the worker keeps by name (beyond its CLI's credentials and the Bedrock/Vertex settings)
 
 
 @dataclass(frozen=True)
@@ -115,7 +117,9 @@ class Config:
         d = dict(d)
         d["board"] = Board(**d.get("board", {}))
         b = dict(d.get("backend") or {})
-        d["backend"] = Backend(str(b.get("kind", "fridica")), Bootstrap(**(b.get("bootstrap") or {})))
+        bs = dict(b.get("bootstrap") or {})
+        if "keep_env" in bs: bs["keep_env"] = tuple(bs["keep_env"])
+        d["backend"] = Backend(str(b.get("kind", "fridica")), Bootstrap(**bs))
         d["reviewers"] = tuple(Reviewer(**r) for r in d.get("reviewers", ()))
         for k in ("channels", "starters", "audit_scopes"): d[k] = tuple(d.get(k, ()))
         return cls(**d)
@@ -156,12 +160,18 @@ def _backend(b: dict) -> Backend:
     if str(bs.get("worker", "claude")) == "codex" and ("max_cost_usd_per_study" not in bs or float(bs["max_cost_usd_per_study"]) != 0):
         raise ValueError("[backend.bootstrap] worker = \"codex\" needs max_cost_usd_per_study = 0 (no ceiling), stated explicitly: codex reports no cost, so a ceiling would never trip; or use worker = \"claude\"")
     d = Bootstrap()
+    budgets = {k: float(bs.get(k, getattr(d, k))) for k in ("max_budget_usd_per_job", "max_cost_usd_per_study")}
+    for k, v in budgets.items():  # nan, inf or a negative value would turn the ceiling check off silently; 0 = no ceiling
+        if not math.isfinite(v) or v < 0: raise ValueError(f"[backend.bootstrap] {k} must be a finite number >= 0 (0 = no ceiling for max_cost_usd_per_study), not {v}")
+    keep_env = bs.get("keep_env", [])
+    if not isinstance(keep_env, list) or not all(isinstance(k, str) for k in keep_env): raise ValueError("[backend.bootstrap] keep_env must be a list of environment variable names")
     return Backend(kind, Bootstrap(
         journal_dir=str(bs.get("journal_dir", d.journal_dir)), worktrees_dir=str(bs.get("worktrees_dir", "")), worker=str(bs.get("worker", "claude")),
         models={str(k): str(v) for k, v in bs.get("models", {}).items()}, efforts={str(k): str(v) for k, v in bs.get("efforts", {}).items()},
-        max_budget_usd_per_job=float(bs.get("max_budget_usd_per_job", d.max_budget_usd_per_job)), max_cost_usd_per_study=float(bs.get("max_cost_usd_per_study", d.max_cost_usd_per_study)),
+        max_budget_usd_per_job=budgets["max_budget_usd_per_job"], max_cost_usd_per_study=budgets["max_cost_usd_per_study"],
         subject_repo=str(bs.get("subject_repo", "")), subject_revision=str(bs.get("subject_revision", "HEAD")), workspace=str(bs.get("workspace", d.workspace)),
         permission_mode=str(bs.get("permission_mode", d.permission_mode)), roles_dir=str(bs.get("roles_dir", "")), retry_backoff=duration(bs.get("retry_backoff"), d.retry_backoff),
+        keep_env=tuple(keep_env),
     ))
 
 

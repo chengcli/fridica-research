@@ -121,7 +121,7 @@ fake claude, put a `claude` script first on `PATH` that prints one claude result
 `tests/test_bootstrap_backend.py` does this in-process with a fake runner. Every file the
 backend writes under `journal_dir` (the journal, `results/` including codex's
 `--output-last-message` file, `sessions/`, `workers/`, `runs/`) is redacted before it is
-written: `sk-` at a word start (and `sk-ant-`), `ghp_`/`gho_`/`ghs_`/`ghu_`/`ghr_`/`github_pat_`,
+written: `sk-` not preceded by a letter or digit (and `sk-ant-`, `KEY_sk-proj-...`), `ghp_`/`gho_`/`ghs_`/`ghu_`/`ghr_`/`github_pat_`,
 `xoxa-`/`xoxb-`/`xoxe-`/`xoxo-`/`xoxp-`/`xoxr-`/`xoxs-`/`xapp-`, `Bearer <token>` (any case),
 `AKIA...` AWS key ids and `-----BEGIN ... PRIVATE KEY-----` blocks; the brief is kept only in
 the redacted journal line. Workers run with a scrubbed environment: the board's `token_env`,
@@ -129,17 +129,24 @@ the redacted journal line. Workers run with a scrubbed environment: the board's 
 `*_SECRET` / `*_KEY` / `*PASSWORD` / `*_PASS` / `*_CREDENTIALS` / `*_SOCK` (so `SSH_AUTH_SOCK`)
 are dropped, except the worker CLI's own credentials (`ANTHROPIC_API_KEY`, `ANTHROPIC_AUTH_TOKEN`,
 `CLAUDE_CODE_OAUTH_TOKEN` for claude; `OPENAI_API_KEY`, `CODEX_API_KEY` for codex; claude's
-OAuth login in `~/.claude` needs none of them). The scrub covers variables only: `HOME` is
+OAuth login in `~/.claude` needs none of them) and the non-secret Bedrock/Vertex settings
+(`AWS_REGION`, `AWS_DEFAULT_REGION`, `AWS_PROFILE`, `GOOGLE_APPLICATION_CREDENTIALS`,
+`CLAUDE_CODE_USE_BEDROCK`, `CLAUDE_CODE_USE_VERTEX`, `CLOUD_ML_REGION`,
+`ANTHROPIC_VERTEX_PROJECT_ID`); `[backend.bootstrap] keep_env = ["NAME", ...]` keeps more by name. The scrub covers variables only: `HOME` is
 kept (claude's login lives under it), so file-based credentials under `HOME` (`~/.ssh`,
 `~/.aws`, `~/.config/gh`, `~/.netrc`, ...) stay readable by a worker running as the same user;
-run the driver as a dedicated user if that matters. An interrupted (timed-out or stopped) job
-whose output carries no cost is charged its full `max_budget_usd_per_job`. Each worker's
+run the driver as a dedicated user if that matters. A launched job that did not finish with a
+parsed result and whose output carries no cost (timed out, stopped, killed by a signal, crashed,
+truncated or unparseable output) is charged its full `max_budget_usd_per_job`; a ceiling of
+nan, inf or a negative number is a config error (exactly 0 means no ceiling). Each worker's
 process group, its leader's start time and its absolute deadline are kept in
 `runs/<ActionId>-a<attempt>.json`, so a driver restarted after a crash kills workers that
 outlived it past their deadline (only while the group's leader is still that process); a
 study's worktrees are removed (`git worktree remove --force`) when it reaches Delivered or
-Stopped (Blocked keeps them for the resume; one with a job still running in it goes when that
-job ends). The bootstrap backend is
+Stopped (Blocked keeps them for the resume; one with a job, or a live orphan of a crashed
+driver, still running in it goes when that job ends). After a crash, a retry of an ActionId
+whose orphaned worker is still alive waits until that orphan ends or is killed at its deadline,
+so two workers never `--resume` the same claude session. The bootstrap backend is
 frozen after the promotion of R2.
 
 ## Architecture

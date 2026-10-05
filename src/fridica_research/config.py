@@ -49,6 +49,8 @@ class GitHub:
     poll_interval: float = 120.0  # seconds between `gh pr view` polls of one PR
     post_merge_window: float = 7 * 86400.0  # keep polling a merged PR this long for late reviews
     bots: tuple[str, ...] = ("copilot", "copilot-pull-request-reviewer", "github-actions")  # never count; any `*[bot]` login too
+    ack_tries: int = 5  # replies tried per post-merge acknowledgement before it becomes a finding and is not retried
+    ack_backoff: float = 600.0  # seconds before the first retry of a failed acknowledgement; doubles after each failure
 
 
 @dataclass(frozen=True)
@@ -163,7 +165,8 @@ def parse(text: str) -> Config:
         board=Board(bool(b.get("enabled", False)), str(b.get("owner", "")), int(b.get("number", 0)), str(b.get("repo", "")), str(b.get("token_env", "GH_TOKEN")), str(b.get("owner_type", "user"))),
         reviewers=reviewers, audit_scopes=scopes, require_signoffs=bool(a.get("require_signoffs", True)),
         people={str(k): str(v) for k, v in raw.get("people", {}).items()}, llm_model=str(raw.get("llm_model", "haiku")),
-        github=GitHub(bool(g.get("enabled", False)), str(g.get("token_env", "GH_TOKEN")), duration(g.get("poll_interval"), 120.0), duration(g.get("post_merge_window"), 7 * 86400.0), tuple(str(x) for x in g.get("bots", GitHub.bots))),
+        github=GitHub(bool(g.get("enabled", False)), str(g.get("token_env", "GH_TOKEN")), duration(g.get("poll_interval"), 120.0), duration(g.get("post_merge_window"), 7 * 86400.0), tuple(str(x) for x in g.get("bots", GitHub.bots)),
+                      int(g.get("ack_tries", 5)), duration(g.get("ack_backoff"), 600.0)),
         repos=repos,
     )
 

@@ -379,7 +379,13 @@ current head (bots such as copilot, the PR's author and every other account neve
 for `post_merge_window` (default 7 days) after `mergedAt`. A `CHANGES_REQUESTED` review by a configured
 reviewer submitted after the merge is acknowledged automatically (once: the reply, the carry and the
 thread line are each recorded as done; a review is marked seen only once the reply succeeded, so a
-failed reply is tried again on the next poll): one reply on the PR (`@<login> acknowledged, goes
+failed reply is tried again on a later poll, at most `ack_tries` times (default 5) with `ack_backoff`
+(default 10 min) before the first retry, doubling after each failure; after the last failed try the reply
+is a finding (`the reply to the post-merge review by <login> on <repo>#<n> failed <k> times and is not
+retried; reply on the PR by hand`) and the rest of the acknowledgement goes ahead without it). The
+acknowledgement is keyed on (PR, reviewer, review id) (store meta `github:pr:...` `acks`): every post-merge
+review is its own, so a later verdict by the same reviewer never cancels one owed, and each review is
+acknowledged exactly once: one reply on the PR (`@<login> acknowledged, goes
 into the next PR.`), one line in the study thread (`acknowledged, goes into the next PR: post-merge
 review by <login> on <repo>#<n>`), one finding per item of the review body (each item cut at 500 characters)
 (`post-merge review by <login> on <repo>#<n>: <item>`), and the items are carried (store meta

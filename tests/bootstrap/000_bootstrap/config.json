@@ -17,6 +17,8 @@
   ],
   "default_projected_hours": 4.0,
   "github": {
+   "ack_backoff": 600.0,
+   "ack_tries": 5,
    "bots": [
     "copilot",
     "copilot-pull-request-reviewer",

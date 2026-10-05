@@ -490,12 +490,34 @@ def test_round2_b1_a_failed_acknowledgement_is_retried_with_each_effect_once():
     gh.fail_once(lambda a: "repos/o/r/issues/9/comments" in a)
     out = poll(g, w)
     assert not any(k.startswith("post:ack") for k in (i.key for i in out.items)) and "9" not in [i.key for i in out.items]
-    out = poll(g, w)
-    poll(g, w)
+    out = poll(g, w, w.now + 600)  # the retry waits for ack_backoff
+    poll(g, w, w.now + 610)
     assert len(gh.api("repos/o/r/issues/9/comments")) == 2  # the failed reply, then the retry; none after
     assert ("ack-9", "acknowledged, goes into the next PR: post-merge review by reviewer on o/r#9") in out.posts
     assert sum(f.endswith("post-merge review by reviewer on o/r#9: rename foo") for f in w.state.findings) == 1
     assert g.carried("o/r") == {"reviewer": ["rename foo"]}
+
+
+def test_issue30_1_acknowledgement_retries_are_bounded_with_backoff_then_a_finding():
+    late = rv(9, "reviewer", "CHANGES_REQUESTED", at="2026-10-04T13:00:00Z", body="- rename foo\n")
+    gh = FakeGh((PR, {"state": "MERGED", "mergedAt": MERGED_AT, "mergeCommit": {"oid": SQUASH}, "reviews": [late]}))
+    g, _ = make(gh)  # the defaults: ack_tries 5, ack_backoff 600 s doubling
+    w = audit_world()
+    w.ev("sign_off", sender=REV, pr=PR, sha=SHA, verdict="approve")
+    for _ in range(200): gh.fail_once(lambda a: "repos/o/r/issues/9/comments" in a)  # 200 refusals in a row
+    t0 = w.now
+    poll(g, w, t0)
+    poll(g, w, t0 + 599)
+    assert len(gh.api("repos/o/r/issues/9/comments")) == 1  # the retry waits for the backoff
+    poll(g, w, t0 + 600)
+    poll(g, w, t0 + 600 + 1199)
+    assert len(gh.api("repos/o/r/issues/9/comments")) == 2  # the backoff doubled
+    for k in range(200): poll(g, w, t0 + 86400 * (k + 1))
+    assert len(gh.api("repos/o/r/issues/9/comments")) == 5  # ack_tries, never 201
+    assert sum(f.endswith("the reply to the post-merge review by reviewer on o/r#9 failed 5 times and is not retried; reply on the PR by hand") for f in w.state.findings) == 1
+    assert sum(f.endswith("post-merge review by reviewer on o/r#9: rename foo") for f in w.state.findings) == 1 and g.carried("o/r") == {"reviewer": ["rename foo"]}
+    c = config.parse('[github]\nack_tries = 2\nack_backoff = "1m"\n')
+    assert (c.github.ack_tries, c.github.ack_backoff) == (2, 60) and (GitHubCfg().ack_tries, GitHubCfg().ack_backoff) == (5, 600)
 
 
 def test_round2_b2_an_outsiders_changes_request_does_not_veto_a_configured_approval():
@@ -553,8 +575,8 @@ def test_round3_b1_a_failed_acknowledgement_after_the_window_is_retried_with_eac
     gh.fail_once(lambda a: "repos/o/r/issues/9/comments" in a)
     out = poll(g, w, end)
     assert "9" not in [i.key for i in out.items]
-    out = poll(g, w, end + 10)
-    poll(g, w, end + 20)
+    out = poll(g, w, end + 600)  # the retry waits for ack_backoff
+    poll(g, w, end + 610)
     assert len(gh.api("repos/o/r/issues/9/comments")) == 2  # the failed reply, then the retry; none after
     assert ("ack-9", "acknowledged, goes into the next PR: post-merge review by reviewer on o/r#9") in out.posts
     assert sum(f.endswith("post-merge review by reviewer on o/r#9: rename foo") for f in w.state.findings) == 1

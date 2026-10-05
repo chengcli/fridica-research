@@ -95,7 +95,7 @@ worker = "claude"                   # claude | codex
 subject_repo = "~/src/fridica-research"   # workers run in `git worktree add --detach <worktrees>/<worker id> <subject_revision>`
 subject_revision = "HEAD"
 max_budget_usd_per_job = 5          # claude --max-budget-usd
-max_cost_usd_per_study = 50         # finished jobs' total_cost_usd + max_budget_usd_per_job per job in flight; a delegate past it is refused (rule R -> Blocked); 0 = no ceiling, required (explicitly) with worker = "codex" (no cost reported)
+max_cost_usd_per_study = 50         # finished jobs' total_cost_usd + max_budget_usd_per_job per job in flight; a delegate past it is refused (rule R -> Blocked); 0 = no ceiling, required (explicitly) with worker = "codex": codex reports no cost and gets no --max-budget-usd, so each codex job is charged its reservation as an estimate
 permission_mode = "bypassPermissions"   # the worker is unattended inside its worktree
 # roles_dir = "~/src/fridica/assets/roles"   # <role>.md appended to the worker's system prompt (R5)
 # retry_backoff = "30s"             # before a re-run of the same ActionId; doubles per retry
@@ -125,16 +125,18 @@ written: `sk-` not preceded by a letter or digit (and `sk-ant-`, `KEY_sk-proj-..
 `xoxa-`/`xoxb-`/`xoxe-`/`xoxo-`/`xoxp-`/`xoxr-`/`xoxs-`/`xapp-`, `Bearer <token>` (any case),
 `AKIA...` AWS key ids and `-----BEGIN ... PRIVATE KEY-----` blocks; the brief is kept only in
 the redacted journal line. Workers get an allowlisted environment, not a scrubbed one: only
-`PATH`, `HOME`, `USER`, `LOGNAME`, `SHELL`, `LANG`, `LC_*`, `TERM`, `TMPDIR`, `TZ`, the worker
+`PATH`, `HOME`, `USER`, `LOGNAME`, `SHELL`, `LANG`, the POSIX locale names (`LC_ALL`, `LC_CTYPE`,
+`LC_COLLATE`, `LC_MESSAGES`, `LC_MONETARY`, `LC_NUMERIC`, `LC_TIME`; no other `LC_` name), `TERM`, `TMPDIR`, `TZ`, the worker
 CLI's own credentials (`ANTHROPIC_API_KEY`, `ANTHROPIC_AUTH_TOKEN`, `CLAUDE_CODE_OAUTH_TOKEN` for
 claude; `OPENAI_API_KEY`, `CODEX_API_KEY` for codex; claude's OAuth login in `~/.claude` needs
 none of them), the non-secret Bedrock/Vertex settings (`AWS_REGION`, `AWS_DEFAULT_REGION`,
 `AWS_PROFILE`, `GOOGLE_APPLICATION_CREDENTIALS`, `CLAUDE_CODE_USE_BEDROCK`,
 `CLAUDE_CODE_USE_VERTEX`, `CLOUD_ML_REGION`, `ANTHROPIC_VERTEX_PROJECT_ID`) and the names in
 `[backend.bootstrap] keep_env = ["NAME", ...]` reach a worker; everything else is dropped, and
-the board's `token_env` never reaches it. `keep_env` may not name the board's `token_env`,
-`FRIDICA_*`, `SLACK_*`, `GH_TOKEN`, `GITHUB_TOKEN`, `NPM_TOKEN`, `*_SECRET*`, `*_PAT`, `*PWD`,
-`*PASSWD` or a database/broker URL (`DATABASE_URL`, `*_DB_URL`, `REDIS_URL`, ...), and a kept
+the board's `token_env` never reaches it. `keep_env` may not name, in any letter case, the board's
+`token_env`, `FRIDICA_*`, `SLACK_*`, `*TOKEN*`, `*SECRET*`, `*PASSWORD*`, `*_PAT`, `*PWD`, `*PASSWD`,
+`*_KEY`, `*_URI` or a database/broker URL (`DATABASE_URL`, `*_DB_URL`, `REDIS_URL`, ...) (the worker
+CLI's own credentials are allowlisted already), and a kept
 variable whose value is a URL with credentials (`scheme://user:password@host`) is refused when
 the backend starts. The allowlist covers variables only: `HOME` is
 kept (claude's login lives under it), so file-based credentials under `HOME` (`~/.ssh`,
@@ -144,7 +146,9 @@ run the driver as a dedicated user if that matters. Every job is charged by one 
 (finished, failed, stopped, timed out); otherwise its full `max_budget_usd_per_job` when its
 worker was spawned (so a killed `claude -p` that printed nothing, or a NaN, infinite or
 negative cost, costs the reservation); 0 when the worker was never spawned (stopped in its
-backoff, a launch error). A ceiling of nan, inf or a negative number is a config error
+backoff, a launch error). A cost that cannot be read as a float (a 401-digit integer) is
+unknown, never an error. Codex reports no cost, so a codex job's `total_cost_usd` is always an
+estimate (its reservation). A ceiling of nan, inf or a negative number is a config error
 (exactly 0 means no ceiling). Each worker is started held: its process group, its leader's
 start time and its absolute deadline are written to `runs/<ActionId>-a<attempt>.json` before
 it is released to run (a driver that dies first leaves a held process that exits unrun), so a
@@ -154,7 +158,8 @@ remove --force`) when it reaches Delivered or Stopped (Blocked keeps them for th
 with a job, or a live orphan of a crashed driver, still running in it goes when that job
 ends). After a crash, a retry of an ActionId whose orphaned worker is still alive waits until
 that orphan ends or is killed at its deadline; an orphan whose liveness cannot be checked
-(`ps` failed) counts as alive until its deadline, so two workers never `--resume` the same claude session. The bootstrap backend is
+(`ps` failed) counts as alive, past its deadline too: its run file stays until its group is confirmed
+dead (killed, or `ps` reports it gone) and the kill is retried on every poll, so two workers never `--resume` the same claude session. The bootstrap backend is
 frozen after the promotion of R2.
 
 ## Architecture

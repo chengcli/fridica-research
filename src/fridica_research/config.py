@@ -5,7 +5,7 @@ import math
 import os
 import re
 import tomllib
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass, field, replace
 from pathlib import Path
 
 DEFAULT_PATH = "~/.config/fridica-research/research.toml"
@@ -51,7 +51,7 @@ class Bootstrap:
     models: dict[str, str] = field(default_factory=dict)  # role -> model (claude --model / codex --model)
     efforts: dict[str, str] = field(default_factory=dict)  # role -> effort level (claude --effort)
     max_budget_usd_per_job: float = 5.0  # claude --max-budget-usd
-    max_cost_usd_per_study: float = 50.0  # ceiling on the sum of total_cost_usd over the journal; a delegate past it is refused; 0 = no ceiling (required with codex)
+    max_cost_usd_per_study: float = 50.0  # ceiling on the sum of total_cost_usd over the journal; a delegate past it is refused; 0 = no ceiling (required with codex, whose charges are estimates)
     subject_repo: str = ""  # git repository the workers check out; empty -> plain directories under worktrees_dir
     subject_revision: str = "HEAD"  # `git worktree add --detach <worktree> <revision>`
     workspace: str = "journal"  # the workspace id of journal threads (`<workspace>:<channel>:<root ts>`)
@@ -178,34 +178,43 @@ def _backend(b: dict, token_env: str = "GH_TOKEN") -> Backend:
     ), token_env))
 
 
-CODEX_CEILING = "[backend.bootstrap] worker = \"codex\" needs max_cost_usd_per_study = 0 (no ceiling), stated explicitly: codex reports no cost, so a ceiling would never trip; or use worker = \"claude\""
-# Names `keep_env` may not bring back into a worker's environment: the board's token_env and these (the driver's own secrets,
-# personal access tokens, passwords, connection URLs that carry credentials). A kept name whose value turns out to be a URL
-# with credentials in it is refused when the backend starts (`bootstrap.worker_env`).
-KEEP_ENV_FORBIDDEN = re.compile(r"^(FRIDICA_.*|SLACK_.*|GH_TOKEN|GITHUB_TOKEN|NPM_TOKEN|.*_SECRET.*|.*_PAT|.*PWD|.*PASSWD"
-                                r"|(.*_)?(DATABASE|DB|REDIS|MONGO|MONGODB|POSTGRES|POSTGRESQL|PG|MYSQL|AMQP|RABBITMQ|BROKER)_URL)$")
+CODEX_CEILING = ("[backend.bootstrap] worker = \"codex\" needs max_cost_usd_per_study = 0 (no ceiling), stated explicitly: codex reports no cost and gets no "
+                 "--max-budget-usd, so each codex job is charged its max_budget_usd_per_job reservation as an estimate, not a measured or enforced "
+                 "cost, and no ceiling is applied to codex; or use worker = \"claude\"")
+# Names `keep_env` may not bring back into a worker's environment, in any case: the board's token_env and these (the driver's
+# own secrets, tokens, keys, personal access tokens, passwords, connection URLs and URIs that carry credentials). The worker
+# CLI's own credentials (`bootstrap.WORKER_CREDENTIALS`, e.g. ANTHROPIC_API_KEY) are allowlisted already and never needed here.
+# A kept name whose value turns out to be a URL with credentials in it is refused when the backend starts (`bootstrap.worker_env`).
+KEEP_ENV_FORBIDDEN = re.compile(r"^(FRIDICA_.*|SLACK_.*|.*TOKEN.*|.*SECRET.*|.*PASSWORD.*|.*_PAT|.*PWD|.*PASSWD|.*_KEY|.*_URI"
+                                r"|(.*_)?(DATABASE|DB|REDIS|MONGO|MONGODB|POSTGRES|POSTGRESQL|PG|MYSQL|AMQP|RABBITMQ|BROKER)_URL)$", re.IGNORECASE)
 
 
 def _budget(k: str, v) -> float:
-    """A budget in USD: a finite number >= 0 (nan, inf or a negative value would turn the ceiling check off silently; a boolean is not a number)."""
+    """A budget in USD: a finite number >= 0 (nan, inf or a negative value would turn the ceiling check off silently; a boolean
+    or a string is not a number), as a float. `parse` and `Config.from_dict` both coerce through here."""
     if isinstance(v, bool): raise ValueError(f"[backend.bootstrap] {k} must be a number, not a boolean ({v})")
+    if not isinstance(v, (int, float)): raise ValueError(f"[backend.bootstrap] {k} must be a number, not {v!r}")
     try: f = float(v)
-    except (TypeError, ValueError): raise ValueError(f"[backend.bootstrap] {k} must be a number, not {v!r}") from None
+    except OverflowError: raise ValueError(f"[backend.bootstrap] {k} must be a finite number, not {v!r}") from None
     if not math.isfinite(f) or f < 0: raise ValueError(f"[backend.bootstrap] {k} must be a finite number >= 0 (0 = no ceiling for max_cost_usd_per_study), not {f}")
     return f
 
 
 def check_bootstrap(bs: Bootstrap, token_env: str) -> Bootstrap:
-    """The `[backend.bootstrap]` rules, for `parse` and for `Config.from_dict` (the replay path) alike."""
-    for k in ("max_budget_usd_per_job", "max_cost_usd_per_study"): _budget(k, getattr(bs, k))
-    if isinstance(bs.retry_backoff, bool) or not isinstance(bs.retry_backoff, (int, float)) or not math.isfinite(bs.retry_backoff) or bs.retry_backoff < 0:
-        raise ValueError(f"[backend.bootstrap] retry_backoff must be a finite duration >= 0, not {bs.retry_backoff!r}")
+    """The `[backend.bootstrap]` rules, for `parse` and for `Config.from_dict` (the replay path) alike; the numeric fields come
+    back as floats (a string such as "50" is refused, never kept)."""
+    bs = replace(bs, **{k: _budget(k, getattr(bs, k)) for k in ("max_budget_usd_per_job", "max_cost_usd_per_study")})
+    rb = bs.retry_backoff
+    try: ok = not isinstance(rb, bool) and isinstance(rb, (int, float)) and math.isfinite(float(rb)) and rb >= 0
+    except OverflowError: ok = False
+    if not ok: raise ValueError(f"[backend.bootstrap] retry_backoff must be a finite duration >= 0, not {rb!r}")
+    bs = replace(bs, retry_backoff=float(rb))
     if bs.worker not in ("claude", "codex"): raise ValueError("[backend.bootstrap] worker must be claude or codex")
     if bs.worker == "codex" and float(bs.max_cost_usd_per_study) != 0: raise ValueError(CODEX_CEILING)
     if float(bs.max_cost_usd_per_study) > 0 and float(bs.max_budget_usd_per_job) <= 0:  # the reservation and the charge of a costless failed job would be $0
         raise ValueError(f"[backend.bootstrap] max_budget_usd_per_job must be > 0 when max_cost_usd_per_study is set ({bs.max_cost_usd_per_study:g}), not {bs.max_budget_usd_per_job:g}")
     if not all(isinstance(k, str) for k in bs.keep_env): raise ValueError("[backend.bootstrap] keep_env must be a list of environment variable names")
-    bad = [k for k in bs.keep_env if k == token_env or KEEP_ENV_FORBIDDEN.match(k)]
+    bad = [k for k in bs.keep_env if k.upper() == token_env.upper() or KEEP_ENV_FORBIDDEN.match(k)]
     if bad: raise ValueError(f"[backend.bootstrap] keep_env may not keep the board token or the driver's secrets: {', '.join(bad)}")
     return bs
 

@@ -8,7 +8,7 @@ strictly increasing over the file's life) and is never synthesised in `execute`.
 subprocesses (`claude -p --output-format json --json-schema <WorkerResult>` or `codex exec`)
 run from a git worktree of the subject revision, one worktree per worker id; when one exits
 its `job_result` line (join_group, job_id, worker_id, role, attempt, job_status, result, code,
-total_cost_usd) is appended by the driver thread. Peer lines (`sender != owner`) are never
+total_cost_usd: the charge, for codex always an estimate, its reservation) is appended by the driver thread. Peer lines (`sender != owner`) are never
 written by the backend: only a corpus or a test injects them through `Journal.append`.
 
 Invariants the tests assert (`tests/test_bootstrap_backend.py`):
@@ -27,20 +27,24 @@ Invariants the tests assert (`tests/test_bootstrap_backend.py`):
   `max_budget_usd_per_job` reservation for every job still in flight, checked inside the journal
   lock (a delegate past it is refused); every job's charge comes from one rule, `charge`: the
   reported cost when it is known (finite and >= 0) whatever the job's status, else the full
-  reservation for a job whose worker was spawned, else 0 (never spawned);
+  reservation for a job whose worker was spawned, else 0 (never spawned); reading a cost never
+  raises (a 401-digit integer is an unknown cost);
 - recorded before it runs: the default runner starts each worker held (`HOLD`), writes its
   process group id, leader start time and absolute deadline to `runs/<ActionId key>-a<attempt>.json`,
   and only then releases it (a driver that dies first leaves a worker that exits unrun); a
   restarted backend kills the overdue groups of jobs that never reported, while the leader still
-  has that start time; an orphan whose liveness is unknown (`ps` failed, no start time recorded)
-  counts as alive until its deadline, and a retry never launches while an orphan of its ActionId
-  is alive; a study's worktrees are removed when it reaches a terminal stage (a worktree with a
+  has that start time; a run file goes only once its group is confirmed dead (killed, or `ps`
+  reports it gone); an orphan whose liveness is unknown (`ps` failed, no start time recorded)
+  counts as alive and keeps its run file, past its deadline too, and the kill is retried on the
+  next `events()`; a retry never launches while an orphan of its ActionId is alive; an exception
+  in the default runner after the release kills the worker's group before it propagates; a study's worktrees are removed when it reaches a terminal stage (a worktree with a
   job still running in it, or a live orphan, when that job's result is reaped or the orphan is gone);
 - redaction-clean: every file the backend writes (journal, `results/`, including codex's
   `--output-last-message` file, `sessions/`, `workers/`, `runs/`) passes `redact`; the brief is
   not kept anywhere but the redacted journal line;
 - allowlisted worker environment: `BASE_ENV` (`PATH`, `HOME`, `USER`, `LOGNAME`, `SHELL`, `LANG`,
-  `LC_*`, `TERM`, `TMPDIR`, `TZ`), the worker CLI's own credentials (`WORKER_CREDENTIALS`), the
+  the POSIX locale names `LC_ALL`, `LC_CTYPE`, `LC_COLLATE`, `LC_MESSAGES`, `LC_MONETARY`, `LC_NUMERIC`,
+  `LC_TIME`, `TERM`, `TMPDIR`, `TZ`), the worker CLI's own credentials (`WORKER_CREDENTIALS`), the
   non-secret Bedrock/Vertex settings (`PROVIDER_SETTINGS`) and the owner's `keep_env`; nothing
   else, and never the board's `token_env`; `HOME` is kept, so file-based credentials under it stay
   reachable.
@@ -95,9 +99,9 @@ WORKER_CREDENTIALS = {"claude": ("ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "C
 PROVIDER_SETTINGS = ("AWS_REGION", "AWS_DEFAULT_REGION", "AWS_PROFILE", "GOOGLE_APPLICATION_CREDENTIALS", "CLAUDE_CODE_USE_BEDROCK", "CLAUDE_CODE_USE_VERTEX",
                      "CLOUD_ML_REGION", "ANTHROPIC_VERTEX_PROJECT_ID")
 ORPHAN_POLL = 5.0  # seconds between checks while a retry waits for a live orphan of its ActionId to end or be killed
-# The worker's environment is an allowlist: these names (and `LC_*`), the worker CLI's own credentials (`WORKER_CREDENTIALS`),
+# The worker's environment is an allowlist: these names (the POSIX locale names only, never any other `LC_*`), the worker CLI's own credentials (`WORKER_CREDENTIALS`),
 # the non-secret provider settings (`PROVIDER_SETTINGS`) and the owner's `keep_env`. Everything else is dropped.
-BASE_ENV = ("PATH", "HOME", "USER", "LOGNAME", "SHELL", "LANG", "TERM", "TMPDIR", "TZ")
+BASE_ENV = ("PATH", "HOME", "USER", "LOGNAME", "SHELL", "LANG", "LC_ALL", "LC_CTYPE", "LC_COLLATE", "LC_MESSAGES", "LC_MONETARY", "LC_NUMERIC", "LC_TIME", "TERM", "TMPDIR", "TZ")
 CREDENTIAL_URL = re.compile(r"^[A-Za-z][A-Za-z0-9+.-]*://[^/?#\s]*@")  # scheme://user[:password]@host
 # The default runner starts the worker held: the process (and its group) exists, but runs nothing until the driver has recorded
 # it in `runs/` and writes to the pipe whose read end is `fd`. A driver that dies first closes the pipe (EOF), and the held
@@ -110,13 +114,13 @@ def held(fd: int, argv: list[str]) -> list[str]:
 
 
 def worker_env(environ, worker: str, drop: tuple[str, ...] = (), keep_env: tuple[str, ...] = ()) -> dict[str, str]:
-    """Only the allowlisted names of the driver's environment (`BASE_ENV`, `LC_*`, the worker CLI's own credentials, the
+    """Only the allowlisted names of the driver's environment (`BASE_ENV`, the worker CLI's own credentials, the
     non-secret provider settings and `keep_env`), never those in `drop` (the board's `token_env`). A `keep_env` name whose
     value is a URL with credentials in it (`scheme://user:password@host`) is refused."""
     bad = [k for k in keep_env if CREDENTIAL_URL.match(str(environ.get(k, "")))]
     if bad: raise ValueError(f"[backend.bootstrap] keep_env may not keep a URL with credentials in it: {', '.join(bad)}")
     keep = {*BASE_ENV, *WORKER_CREDENTIALS.get(worker, ()), *PROVIDER_SETTINGS, *keep_env}
-    return {k: v for k, v in environ.items() if (k in keep or k.startswith("LC_")) and k not in drop}
+    return {k: v for k, v in environ.items() if k in keep and k not in drop}
 
 
 def process_start(pid: int) -> str | None:
@@ -290,6 +294,9 @@ class ProcessRunner:
             out, err = p.communicate()
             log.warning("worker killed at the deadline (%.0f s): %s", timeout, argv[0])
             return out or "", None
+        except BaseException:  # the worker may be running: never leave it untracked (its run file goes with the failed job)
+            self.killpg(p)
+            raise
         finally:
             with self._lock:
                 self.procs.pop(key, None)
@@ -382,7 +389,9 @@ class BootstrapBackend:
     def _kill_overdue(self):
         """Orphaned workers (their driver died) past their deadline: kill the process group, drop the run file.
         The group is killed only while its leader is still the spawned worker (same start time): a pgid reused by an
-        unrelated process after a long downtime is left alone."""
+        unrelated process after a long downtime is left alone. The run file is dropped only once the group is confirmed dead
+        (killed, or `ps` reports the leader gone or replaced); when liveness is unknown (`ps` failed, no start time recorded)
+        the file stays, the orphan counts as alive (`_orphan_alive`), and the next `events()` tries again."""
         now = self.clock()
         for job in list(self.jobs.values()):
             if not job.get("orphan"): continue
@@ -394,11 +403,18 @@ class BootstrapBackend:
             try: pgid = int(run["pgid"])
             except (KeyError, TypeError, ValueError): pgid = None
             start = self.proc_start(pgid) if pgid else None
-            if pgid and start is not None and start == run.get("start"):
+            if pgid and start and start == run.get("start"):
                 try: os.killpg(pgid, signal.SIGKILL)
-                except (ProcessLookupError, PermissionError): pass
+                except ProcessLookupError: pass  # gone meanwhile
+                except PermissionError:
+                    log.warning("overdue worker group %s of %s not killed (permission): kept, retried on the next poll", pgid, job["job_id"])
+                    continue
                 log.warning("killed the overdue worker group %s of %s (driver restarted)", pgid, job["job_id"])
-            else: log.warning("overdue worker group %s of %s is gone or no longer the worker (started %s, recorded %s): not killed", pgid, job["job_id"], start, run.get("start"))
+            elif pgid and (start == "" or (start and run.get("start") is not None)):
+                log.warning("overdue worker group %s of %s is gone or no longer the worker (started %r, recorded %r): not killed", pgid, job["job_id"], start, run.get("start"))
+            else:  # unknown: `ps` failed, or no start time was recorded; alive until confirmed dead
+                log.warning("overdue worker group %s of %s: liveness unknown (started %r, recorded %r), kept as alive and retried on the next poll", pgid, job["job_id"], start, run.get("start"))
+                continue
             f.unlink(missing_ok=True)
             self._release_pending(job["worker_id"])
 
@@ -467,21 +483,23 @@ class BootstrapBackend:
 
     def _orphan_alive(self, job: dict) -> bool:
         """An orphan whose recorded process group leader is still the worker the crashed driver spawned (the F4 start-time check).
-        Fails closed: when liveness is unknown (`ps` failed, the start time was never recorded, the run file is unreadable) the
-        orphan is alive until its deadline. No run file means the worker never ran: the default runner holds it until the run
-        file is written, and the file goes only after the result file or past the deadline (`_kill_overdue`)."""
+        Fails closed: when liveness is unknown (`ps` failed, the start time was never recorded) the orphan is alive, past its
+        deadline too (`_kill_overdue` keeps its run file until the group is confirmed dead); an unreadable run file counts as
+        alive until the latest deadline the job could have. No run file means the worker never ran or is confirmed dead: the
+        default runner holds it until the run file is written, and the file goes only after the result file or once
+        `_kill_overdue` confirmed the group dead."""
         if not job.get("orphan"): return False
         f = self.dir / "runs" / f"{run_key(job['action_id'], job['attempt'])}.json"
         if not f.exists(): return False
         now = self.clock()
         try:
             run = json.loads(f.read_text())
-            pgid, deadline = int(run["pgid"]), float(run["deadline"])
+            pgid, _ = int(run["pgid"]), float(run["deadline"])  # a run file without both is unreadable
         except (OSError, ValueError, KeyError, TypeError):  # unreadable: alive until the latest deadline the job could have
             return now < float(job.get("time", 0)) + self.b.retry_backoff * BACKOFF_CAP + float(job.get("timeout", 0))
         start = self.proc_start(pgid)
         if start == "": return False  # `ps` reports no such process
-        if start is None or run.get("start") is None: return now < deadline  # unknown
+        if start is None or run.get("start") is None: return True  # unknown: alive until confirmed dead
         return start == run["start"]
 
     def _orphan_of(self, job: dict) -> dict | None:
@@ -610,9 +628,15 @@ class BootstrapBackend:
         is known (a finite number >= 0; Python's json reads NaN and Infinity), whatever the job's status (finished, failed,
         stopped, timed out). A job whose worker was spawned and reported no known cost is charged its full reservation: a
         killed `claude -p` prints nothing, yet it may have spent up to `max_budget_usd_per_job`. A job whose worker was never
-        spawned (stopped in its backoff, a launch error) ran nothing and is charged 0."""
+        spawned (stopped in its backoff, a launch error) ran nothing and is charged 0. Reading the cost never raises: one that
+        cannot be read as a float (a 401-digit integer overflows, OverflowError) is unknown. For codex, which reports no cost,
+        the charge is always an estimate (the reservation)."""
         c = outcome.get("cost")
-        if isinstance(c, (int, float)) and not isinstance(c, bool) and math.isfinite(c) and c >= 0: return float(c)
+        try:
+            if isinstance(c, (int, float)) and not isinstance(c, bool):
+                f = float(c)
+                if math.isfinite(f) and f >= 0: return f
+        except (OverflowError, TypeError, ValueError): pass  # unknown
         return float(job.get("reserved_usd", self.b.max_budget_usd_per_job)) if outcome.get("spawned") else 0.0
 
     def outcome(self, job: dict, stdout: str, rc) -> dict:

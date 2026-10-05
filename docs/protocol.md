@@ -227,7 +227,8 @@ the restart probe are the same over either.
   `codex exec -C <cwd> --output-schema`) run from `worktrees/<worker id>`, a detached
   `git worktree` of `subject_revision`, reused per worker id; when one exits, its result is
   written to `results/<ActionId>-a<attempt>.json` and then a `job_result` line (join_group, job_id,
-  worker_id, role, attempt, job_status, result, code, total_cost_usd) is appended, from which
+  worker_id, role, attempt, job_status, result, code, total_cost_usd: the charge, an estimate (the
+  reservation) for codex) is appended, from which
   `thread_view` is rebuilt for the restart probe. Peer lines (`sender != owner`) are never
   written by the backend; a corpus or a test injects them. Invariants the backend asserts in
   code (`tests/test_bootstrap_backend.py`): single writer (`flock` on `journal.lock`, one
@@ -245,8 +246,9 @@ the restart probe are the same over either.
   the worker was spawned; else 0 (never spawned); a
   non-finite or negative ceiling is a config error (0 = no ceiling); a retry never launches
   while a live orphan of its ActionId runs (no two workers on one session), and an orphan whose
-  liveness is unknown (`ps` failed) counts as alive until its deadline; codex reports no cost, so `worker = "codex"` needs
-  an explicit `max_cost_usd_per_study = 0` (no ceiling); each worker is started held, and its process group, leader
+  liveness is unknown (`ps` failed) counts as alive and keeps its run file until its group is confirmed dead (the
+  kill is retried on every poll); codex reports no cost and gets no `--max-budget-usd`, so a codex job is charged its
+  reservation as an estimate and `worker = "codex"` needs an explicit `max_cost_usd_per_study = 0` (no ceiling); each worker is started held, and its process group, leader
   start time and absolute deadline are written to `runs/<ActionId>-a<attempt>.json` before it
   is released to run; a restarted backend kills the overdue groups of jobs that never reported, while the leader
   still has that start time); unreadable worker output is a failed job

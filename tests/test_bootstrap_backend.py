@@ -972,17 +972,17 @@ def test_bedrock_and_vertex_settings_and_keep_env_survive_the_scrub(tmp_path, mo
     """L2: the non-secret provider settings stay by default, `keep_env` keeps more by name, a secret still goes."""
     provider = {"AWS_REGION": "us-east-1", "AWS_DEFAULT_REGION": "us-east-1", "AWS_PROFILE": "p", "GOOGLE_APPLICATION_CREDENTIALS": "/c.json",
                 "CLAUDE_CODE_USE_BEDROCK": "1", "CLAUDE_CODE_USE_VERTEX": "1", "CLOUD_ML_REGION": "us-east5", "ANTHROPIC_VERTEX_PROJECT_ID": "proj"}
-    env = {"PATH": os.environ["PATH"], **provider, "AWS_SECRET_ACCESS_KEY": "s", "AWS_SESSION_TOKEN": "t", "MY_PROXY_TOKEN": "m", "GH_TOKEN": "g"}
+    env = {"PATH": os.environ["PATH"], **provider, "AWS_SECRET_ACCESS_KEY": "s", "AWS_SESSION_TOKEN": "t", "MY_PROXY_HOST": "m", "GH_TOKEN": "g"}
     assert set(worker_env(env, "claude")) == {"PATH", *provider}
-    assert set(worker_env(env, "claude", keep_env=("MY_PROXY_TOKEN",))) == {"PATH", "MY_PROXY_TOKEN", *provider}
-    c = config.parse('[backend]\nkind = "bootstrap"\n[backend.bootstrap]\nkeep_env = ["MY_PROXY_TOKEN"]\n')
-    assert c.backend.bootstrap.keep_env == ("MY_PROXY_TOKEN",) and config.Config.from_dict(json.loads(json.dumps(c.to_dict()))) == c
+    assert set(worker_env(env, "claude", keep_env=("MY_PROXY_HOST",))) == {"PATH", "MY_PROXY_HOST", *provider}
+    c = config.parse('[backend]\nkind = "bootstrap"\n[backend.bootstrap]\nkeep_env = ["MY_PROXY_HOST"]\n')
+    assert c.backend.bootstrap.keep_env == ("MY_PROXY_HOST",) and config.Config.from_dict(json.loads(json.dumps(c.to_dict()))) == c
     with pytest.raises(ValueError, match="keep_env"): config.parse('[backend]\nkind = "bootstrap"\n[backend.bootstrap]\nkeep_env = "X"\n')
     for k, v in env.items(): monkeypatch.setenv(k, v)
     cfg = dataclasses.replace(c, state_path=str(tmp_path / "s.sqlite3"), backend=config.Backend("bootstrap", dataclasses.replace(c.backend.bootstrap, journal_dir=str(tmp_path / "journal"))))
     out, rc = BootstrapBackend(cfg, sleep=lambda s: None).runner(["sh", "-c", "env"], str(tmp_path), 5)  # the default runner
     names = {line.split("=", 1)[0] for line in out.splitlines()}
-    assert rc == 0 and {"MY_PROXY_TOKEN", *provider} <= names and not names & {"AWS_SECRET_ACCESS_KEY", "AWS_SESSION_TOKEN", "GH_TOKEN"}
+    assert rc == 0 and {"MY_PROXY_HOST", *provider} <= names and not names & {"AWS_SECRET_ACCESS_KEY", "AWS_SESSION_TOKEN", "GH_TOKEN"}
 
 
 def live_orphan(cfg, aid="t/g1/i1/Explore/a1/explorer"):
@@ -1122,8 +1122,8 @@ def test_a_zero_per_job_budget_with_a_ceiling_is_a_config_error():
 def test_keep_env_may_not_keep_the_board_token_or_the_drivers_secrets(name):
     """L1: keep_env rejects the board's token_env and FRIDICA_*, SLACK_*, GH_TOKEN, GITHUB_TOKEN, *_SECRET*."""
     with pytest.raises(ValueError, match="keep_env may not keep"):
-        config.parse(f'[board]\ntoken_env = "BOARD_PAT"\n[backend]\nkind = "bootstrap"\n[backend.bootstrap]\nkeep_env = ["MY_PROXY_TOKEN", "{name}"]\n')
-    assert config.parse('[board]\ntoken_env = "BOARD_PAT"\n[backend.bootstrap]\nkeep_env = ["MY_PROXY_TOKEN"]\n').backend.bootstrap.keep_env == ("MY_PROXY_TOKEN",)
+        config.parse(f'[board]\ntoken_env = "BOARD_PAT"\n[backend]\nkind = "bootstrap"\n[backend.bootstrap]\nkeep_env = ["MY_PROXY_HOST", "{name}"]\n')
+    assert config.parse('[board]\ntoken_env = "BOARD_PAT"\n[backend.bootstrap]\nkeep_env = ["MY_PROXY_HOST"]\n').backend.bootstrap.keep_env == ("MY_PROXY_HOST",)
 
 
 @pytest.mark.parametrize("cost", ["NaN", "-1.0", "Infinity"])
@@ -1209,7 +1209,7 @@ def test_one_cost_rule_charges_every_job(tmp_path, ending, cost):
 
 
 ALLOWED = {"HOME": "/h", "USER": "u", "LOGNAME": "u", "SHELL": "/bin/sh", "LANG": "C", "LC_ALL": "C", "LC_CTYPE": "C", "TERM": "dumb", "TMPDIR": "/tmp", "TZ": "UTC",
-           "ANTHROPIC_API_KEY": "a", "AWS_REGION": "us-east-1", "MY_PROXY_TOKEN": "m"}
+           "ANTHROPIC_API_KEY": "a", "AWS_REGION": "us-east-1", "MY_PROXY_HOST": "m"}
 DROPPED = {"GITHUB_PAT": "p", "GH_PAT": "p", "MYSQL_PWD": "p", "DATABASE_URL": "postgres://u:p@h/d", "NPM_TOKEN": "n", "FOO_BAR": "f", "BOARD_CRED": "b", "OPENAI_API_KEY": "o"}
 SHELL_ADDED = {"PWD", "OLDPWD", "SHLVL", "_", "__CF_USER_TEXT_ENCODING"}  # set by the shell (or macOS) inside the worker, not passed by the driver
 
@@ -1218,18 +1218,18 @@ def test_the_worker_environment_is_an_allowlist(tmp_path, monkeypatch):
     """B: only the allowlisted names reach the worker; GITHUB_PAT, GH_PAT, MYSQL_PWD, DATABASE_URL, NPM_TOKEN, an unknown FOO_BAR and
     the board token under a custom name (BOARD_CRED) do not (on d669b21 GITHUB_PAT, GH_PAT, MYSQL_PWD and FOO_BAR did)."""
     allowed = {"PATH": os.environ["PATH"], **ALLOWED}
-    assert worker_env({**allowed, **DROPPED}, "claude", drop=("BOARD_CRED",), keep_env=("MY_PROXY_TOKEN",)) == allowed
-    assert worker_env({**allowed, **DROPPED}, "codex", keep_env=("MY_PROXY_TOKEN",)) == {**{k: v for k, v in allowed.items() if k != "ANTHROPIC_API_KEY"}, "OPENAI_API_KEY": "o"}
+    assert worker_env({**allowed, **DROPPED}, "claude", drop=("BOARD_CRED",), keep_env=("MY_PROXY_HOST",)) == allowed
+    assert worker_env({**allowed, **DROPPED}, "codex", keep_env=("MY_PROXY_HOST",)) == {**{k: v for k, v in allowed.items() if k != "ANTHROPIC_API_KEY"}, "OPENAI_API_KEY": "o"}
     for k in list(os.environ): monkeypatch.delenv(k)
     for k, v in {**allowed, **DROPPED}.items(): monkeypatch.setenv(k, v)
-    c = config.parse('[board]\ntoken_env = "BOARD_CRED"\n[backend]\nkind = "bootstrap"\n[backend.bootstrap]\nkeep_env = ["MY_PROXY_TOKEN"]\n')
+    c = config.parse('[board]\ntoken_env = "BOARD_CRED"\n[backend]\nkind = "bootstrap"\n[backend.bootstrap]\nkeep_env = ["MY_PROXY_HOST"]\n')
     cfg = dataclasses.replace(c, state_path=str(tmp_path / "s.sqlite3"), backend=config.Backend("bootstrap", dataclasses.replace(c.backend.bootstrap, journal_dir=str(tmp_path / "journal"))))
     out, rc = BootstrapBackend(cfg, sleep=lambda s: None).runner(["sh", "-c", "env"], str(tmp_path), 10)  # the default runner
     names = {line.split("=", 1)[0] for line in out.splitlines() if "=" in line}
     assert rc == 0 and names - SHELL_ADDED == set(allowed)
 
 
-@pytest.mark.parametrize("name", ["GITHUB_PAT", "GH_PAT", "MYSQL_PWD", "PGPASSWD", "DATABASE_URL", "REDIS_URL", "APP_DB_URL", "NPM_TOKEN"])
+@pytest.mark.parametrize("name", ["GITHUB_PAT", "GH_PAT", "MYSQL_PWD", "PGPASSWORD", "DATABASE_URL", "REDIS_URL", "APP_DB_URL", "NPM_TOKEN"])
 def test_keep_env_may_not_keep_pats_passwords_or_database_urls(name):
     with pytest.raises(ValueError, match="keep_env may not keep"):
         config.parse(f'[backend]\nkind = "bootstrap"\n[backend.bootstrap]\nkeep_env = ["{name}"]\n')
@@ -1243,25 +1243,35 @@ def test_keep_env_may_not_keep_a_url_with_credentials(tmp_path, monkeypatch):
     assert "ANTHROPIC_BASE_URL" in BootstrapBackend(cfg, sleep=lambda s: None).runner.env
 
 
-def test_an_orphan_whose_liveness_is_unknown_is_alive_until_its_deadline(tmp_path):
-    """C: `ps` fails (start None): the orphan counts as alive until its recorded deadline, so the retry waits (on d669b21 it was
-    read as dead and the retry launched next to it at once)."""
+def test_an_orphan_whose_liveness_is_unknown_is_alive_until_confirmed_dead(tmp_path):
+    """C, 3g item 1: `ps` fails (start None): the orphan counts as alive, past its deadline too; the run file stays and the retry
+    waits; once `ps` works the next events() kills the group, drops the run file, and the retry launches (on 32656f9 the run file
+    was deleted at the deadline without a kill, so the retry ran `--resume` beside the live orphan)."""
     cfg = bootstrap_cfg(tmp_path, dataclasses.replace(CFG, projection={**CFG.projection, "explore": 100}))
     procs, cleanup = live_orphan(cfg)  # deadline 1200
+    run_file = Path(cfg.backend.bootstrap.journal_dir) / "runs" / f"{run_key('t/g1/i1/Explore/a1/explorer', 1)}.json"
     try:
-        clock, polls, launched = Clock(1100.0), [], []
+        ps = {"fn": lambda pid: None}  # `ps` fails
+        polls, launched = [], []
         def sleep(s):
-            polls.append(clock.t)
-            if len(polls) == 3: clock.t = 1201.0  # past the deadline
+            polls.append(s)
+            time.sleep(0.01)
         def runner(argv, cwd, timeout):
-            launched.append(clock.t)
+            launched.append(run_file.exists())
             return claude_json(payload(result(report="r")), argv), 0
-        b2 = BootstrapBackend(cfg, runner=runner, clock=clock, sleep=sleep, proc_start=lambda pid: None)
-        assert b2._orphan_alive(b2.jobs["job-1"])
+        b2 = BootstrapBackend(cfg, runner=runner, clock=Clock(1201.0), sleep=sleep, proc_start=lambda pid: ps["fn"](pid))  # past the deadline
+        b2.events(0)
+        assert run_file.exists() and procs[0].poll() is None and b2._orphan_alive(b2.jobs["job-1"])
         b2.delegate("journal:C1:1.000000", explorer_req("t/g1/i1/Explore/a1/explorer"))
+        assert wait_for(lambda: len(polls) >= 3)
+        b2.events(0)  # still unknown: kept, still waiting
+        assert run_file.exists() and not launched and procs[0].poll() is None
+        ps["fn"] = process_start  # `ps` works again: the next poll kills the group
+        b2.events(0)
+        assert procs[0].wait(5) == -9 and not run_file.exists()
         b2.join(10)
-        assert polls == [1100.0, 1100.0, 1100.0] and launched == [1201.0]
-        assert process_start(procs[0].pid) not in (None, "") and process_start(2 ** 22 + 12345) == ""  # alive; no such process is "", not None
+        assert launched == [False]  # launched only once the orphan was confirmed dead
+        assert process_start(procs[0].pid) in ("", None) and process_start(2 ** 22 + 12345) == ""  # no such process is "", not None
     finally:
         cleanup()
 
@@ -1298,3 +1308,102 @@ def test_a_worker_is_never_released_unrecorded(tmp_path):
     assert p.wait(10) == 70
     time.sleep(0.2)
     assert not marker.exists()
+
+
+# -- review fixes (iteration 3g): each behavioural one fails on 32656f9 ------------------------------------
+HUGE = "1" + "0" * 400  # a 401-digit integer: json reads it as an int, and float() / math.isfinite overflow on it
+
+
+def test_an_overflowing_cost_is_unknown_and_charged_the_reservation_through_reap(tmp_path):
+    """3g item 2: a 401-digit total_cost_usd made `charge` raise OverflowError in reap (the job was never recorded)."""
+    out = '{"type":"result","is_error":true,"total_cost_usd":' + HUGE + '}'
+    backend = BootstrapBackend(bootstrap_cfg(tmp_path, max_budget_usd_per_job=5.0, max_cost_usd_per_study=50.0), runner=lambda a, c, t: (out, 0), sleep=lambda s: None)
+    explore(backend, 1)
+    jr = [r for r in backend.journal.all() if r["kind"] == "job_result"]
+    assert [(r["code"], r["total_cost_usd"]) for r in jr] == [("is_error", 5.0)] and (backend.spent(), backend.reserved()) == (5.0, 0.0)
+
+
+def test_an_overflowing_cost_in_a_result_file_does_not_crash_recovery(tmp_path):
+    """3g item 2: the same cost in a result file written before a crash made every restart raise in `_recover`."""
+    cfg = bootstrap_cfg(tmp_path, max_budget_usd_per_job=5.0, max_cost_usd_per_study=50.0)
+    aid = "t/g1/i1/Explore/a1/explorer"
+    b1 = BootstrapBackend(cfg, runner=lambda a, c, t: ("", None), sleep=lambda s: None)
+    b1.delegate("journal:C1:1.000000", explorer_req(aid))
+    b1.join(10)  # the driver crashes before reap: a job line, a result file, no job_result
+    f = Path(cfg.backend.bootstrap.journal_dir) / "results" / f"{run_key(aid, 1)}.json"
+    f.write_text('{"code": "is_error", "cost": ' + HUGE + ', "job_status": "failed", "result": null, "session_id": "s", "spawned": true}')
+    b2 = BootstrapBackend(cfg, runner=lambda a, c, t: ("", None), sleep=lambda s: None)
+    jr = [r for r in b2.journal.all() if r["kind"] == "job_result"]
+    assert [(r["code"], r["total_cost_usd"]) for r in jr] == [("is_error", 5.0)] and not b2.jobs and b2.reserved() == 0.0
+
+
+def test_an_exception_after_the_release_kills_the_worker_group(tmp_path, monkeypatch):
+    """3g item 3: communicate raising after the release left the released worker running, untracked (and _run deleted its run file)."""
+    seen, real = [], subprocess.Popen.communicate
+    def communicate(self, input=None, timeout=None):
+        if timeout is not None:  # the call after the release
+            seen.append(self)
+            raise OSError("pipe broke")
+        return real(self, input, timeout)
+    monkeypatch.setattr(subprocess.Popen, "communicate", communicate)
+    try:
+        with pytest.raises(OSError, match="pipe broke"): ProcessRunner(on_spawn=lambda argv, pgid: None)(["sleep", "30"], str(tmp_path), 60)
+        assert seen and seen[0].wait(5) == -9
+    finally:
+        for p in seen:
+            try: os.killpg(p.pid, 9)
+            except (ProcessLookupError, PermissionError): pass
+
+
+SECRET_NAMES = ["SECRET_KEY", "PGPASSWORD", "MYSQL_PASSWORD", "DB_PASSWORD", "AWS_SESSION_TOKEN", "MONGO_URI", "GITHUB_PAT", "MYSQL_PWD", "MY_PASSWD",
+                "STRIPE_API_KEY", "MY_PROXY_TOKEN", "CLIENT_SECRET", "ANTHROPIC_API_KEY"]
+
+
+@pytest.mark.parametrize("name", SECRET_NAMES + [n.lower() for n in SECRET_NAMES])
+def test_keep_env_refuses_secret_names_in_any_case(name):
+    """3g item 4: *PASSWORD*, *SECRET*, *TOKEN*, *_URI, *_PAT, *PWD, *PASSWD, *_KEY, in any case (on 32656f9 SECRET_KEY, PGPASSWORD,
+    MYSQL_PASSWORD, DB_PASSWORD, AWS_SESSION_TOKEN, MONGO_URI and every lowercase name were kept)."""
+    with pytest.raises(ValueError, match="keep_env may not keep"):
+        config.parse(f'[backend]\nkind = "bootstrap"\n[backend.bootstrap]\nkeep_env = ["{name}"]\n')
+
+
+def test_keep_env_compares_the_board_token_in_any_case():
+    with pytest.raises(ValueError, match="keep_env may not keep"):
+        config.parse('[board]\ntoken_env = "BOARD_CRED"\n[backend.bootstrap]\nkeep_env = ["board_cred"]\n')
+    keep = ("MY_PROXY_HOST", "HTTPS_PROXY", "ANTHROPIC_BASE_URL", "NODE_EXTRA_CA_CERTS")
+    assert config.parse(f'[backend.bootstrap]\nkeep_env = {json.dumps(list(keep))}\n').backend.bootstrap.keep_env == keep
+
+
+def test_only_the_posix_locale_names_reach_the_worker(tmp_path, monkeypatch):
+    """3g item 5: any LC_ name passed (LC_GITHUB_TOKEN reached the worker through the real runner on 32656f9)."""
+    posix = {k: "C" for k in ("LC_ALL", "LC_CTYPE", "LC_COLLATE", "LC_MESSAGES", "LC_MONETARY", "LC_NUMERIC", "LC_TIME")}
+    env = {"PATH": os.environ["PATH"], **posix, "LC_GITHUB_TOKEN": "ghp_x", "LC_TERMINAL": "iTerm2"}
+    assert worker_env(env, "claude") == {"PATH": os.environ["PATH"], **posix}
+    for k in list(os.environ): monkeypatch.delenv(k)
+    for k, v in env.items(): monkeypatch.setenv(k, v)
+    out, rc = BootstrapBackend(bootstrap_cfg(tmp_path), sleep=lambda s: None).runner(["sh", "-c", "env"], str(tmp_path), 10)  # the default runner
+    names = {line.split("=", 1)[0] for line in out.splitlines() if "=" in line}
+    assert rc == 0 and set(posix) <= names and not names & {"LC_GITHUB_TOKEN", "LC_TERMINAL"}
+
+
+@pytest.mark.parametrize("key,value", [("max_cost_usd_per_study", "50"), ("max_budget_usd_per_job", "5"), ("retry_backoff", "30"), ("max_cost_usd_per_study", int(HUGE))])
+def test_from_dict_refuses_a_string_for_a_numeric_field(tmp_path, key, value):
+    """3g item 6: from_dict kept the string "50" and the first delegate raised TypeError in the ceiling check."""
+    d = json.loads(json.dumps(config.parse('[backend]\nkind = "bootstrap"\n').to_dict()))
+    d["backend"]["bootstrap"][key] = value
+    with pytest.raises(ValueError, match=key): config.Config.from_dict(d)
+    if key != "retry_backoff" and isinstance(value, str):  # parse refuses a string budget too ("30s" stays a valid TOML duration)
+        with pytest.raises(ValueError, match=key): config.parse(f'[backend]\nkind = "bootstrap"\n[backend.bootstrap]\n{key} = {json.dumps(value)}\n')
+
+
+def test_from_dict_coerces_numeric_fields_to_floats_like_parse():
+    d = json.loads(json.dumps(config.parse('[backend]\nkind = "bootstrap"\n').to_dict()))
+    d["backend"]["bootstrap"].update(max_cost_usd_per_study=50, max_budget_usd_per_job=5, retry_backoff=30)
+    bs = config.Config.from_dict(d).backend.bootstrap
+    assert [(type(v), v) for v in (bs.max_cost_usd_per_study, bs.max_budget_usd_per_job, bs.retry_backoff)] == [(float, 50.0), (float, 5.0), (float, 30.0)]
+    assert bs == config.parse('[backend]\nkind = "bootstrap"\n[backend.bootstrap]\nmax_cost_usd_per_study = 50\nmax_budget_usd_per_job = 5\nretry_backoff = 30\n').backend.bootstrap
+
+
+def test_the_codex_ceiling_message_says_the_charge_is_an_estimate():
+    with pytest.raises(ValueError, match="reservation as an estimate"):
+        config.parse('[backend]\nkind = "bootstrap"\n[backend.bootstrap]\nworker = "codex"\nmax_cost_usd_per_study = 20\n')

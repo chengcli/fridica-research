@@ -7,6 +7,21 @@
 - fridica: daemon, Slack, placement, egress; no research protocol.
 - fridica-research: research policy (roles, stages, stance, trees, rewards).
 
+## PR discussion and role jurisdiction (R38/R39)
+
+Each PR has one root message; its review and design discussion stay in that root's thread.
+Each participant holds one persistent role for that PR (explorer, debater, implementer or
+auditor), and assignments may rotate between PRs. The first-pass implementer owns revisions
+and is the only role that commits code. Exactly one reviewer is assigned to the PR: its
+auditor. Only that auditor submits a GitHub review, bound to the current head. The auditor's
+technical approval precedes a human maintainer's merge decision.
+
+Debate covers at least two distinct lenses, followed by a summary of their agreement,
+disagreement and surviving evidence in the PR discussion. Record gaps and follow-ups as
+evidence-backed issues in the owning repository, with the first-pass author as owner and a
+board card. These are role and review contracts; driver enforcement of the PR-thread workflow
+is deferred to the 2026-10-07 bundle. The study loop below describes current driver behavior.
+
 Seed for the auditor decision tree in #25: area **layer boundary**. The audits that approved
 fridica-core #2 missed a spec-level policy leak; its layer-boundary observation is a
 confirmed miss (`z = -1`). A future audit that finds a similar request in a lower-layer issue

@@ -119,10 +119,13 @@ PRs. The first-pass implementer retains revisions and follow-ups for that PR.
 
 ## Sign-off
 
-25. Post the exact standalone SHA-bound `SIGN-OFF #<pr> <sha> approve|changes` line in the
-    authorized PR thread under the host review procedure. Where separately authorized, the
-    assigned auditor also gives a current-head GitHub approval as the technical gate; it does
-    not replace the thread sign-off or the human merge decision.
+25. The authorized PR thread is that PR's single root discussion thread. When assigned and
+    authorized to review, post the exact standalone SHA-bound
+    `SIGN-OFF #<pr> <sha> approve|changes` line there and submit the auditor's current-head
+    GitHub review. Both are part of the technical review procedure; only the assigned auditor
+    submits that GitHub review. An approval must precede the human maintainer's merge decision.
+    If GitHub review permission is unavailable, report the technical gate as blocked; a thread
+    sign-off alone does not clear it.
 26. Re-check the head immediately before signing. Any push resets your sign-off; do not sign a
     head you did not review.
 27. A review that lands after merge still counts. Route its findings to the first-pass author

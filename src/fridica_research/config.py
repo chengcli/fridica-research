@@ -1,10 +1,11 @@
 """research.toml: the driver's configuration (stdlib tomllib)."""
 from __future__ import annotations
 
+import math
 import os
 import re
 import tomllib
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass, field, replace
 from pathlib import Path
 
 DEFAULT_PATH = "~/.config/fridica-research/research.toml"
@@ -42,6 +43,31 @@ class Board:
 
 
 @dataclass(frozen=True)
+class Bootstrap:
+    """`[backend.bootstrap]`: the feed-journal backend (R15). One journal (one study lineage) per `journal_dir`."""
+    journal_dir: str = "~/.local/state/fridica-research/journal"
+    worktrees_dir: str = ""  # default <journal_dir>/worktrees
+    worker: str = "claude"  # claude | codex
+    models: dict[str, str] = field(default_factory=dict)  # role -> model (claude --model / codex --model)
+    efforts: dict[str, str] = field(default_factory=dict)  # role -> effort level (claude --effort)
+    max_budget_usd_per_job: float = 5.0  # claude --max-budget-usd
+    max_cost_usd_per_study: float = 50.0  # ceiling on the sum of total_cost_usd over the journal; a delegate past it is refused; 0 = no ceiling (required with codex, whose charges are estimates)
+    subject_repo: str = ""  # git repository the workers check out; empty -> plain directories under worktrees_dir
+    subject_revision: str = "HEAD"  # `git worktree add --detach <worktree> <revision>`
+    workspace: str = "journal"  # the workspace id of journal threads (`<workspace>:<channel>:<root ts>`)
+    permission_mode: str = "bypassPermissions"  # claude --permission-mode for an unattended worker in its worktree
+    roles_dir: str = ""  # `<roles_dir>/<role>.md` is appended to the worker's system prompt when present (R5)
+    retry_backoff: float = 30.0  # seconds before a re-delegate of a seen ActionId starts; doubles per retry, capped at 8x
+    keep_env: tuple[str, ...] = ()  # more environment variables the worker keeps by name (beyond its CLI's credentials and the Bedrock/Vertex settings)
+
+
+@dataclass(frozen=True)
+class Backend:
+    kind: str = "fridica"  # fridica | bootstrap
+    bootstrap: Bootstrap = field(default_factory=Bootstrap)
+
+
+@dataclass(frozen=True)
 class Config:
     socket: str = "~/.local/state/fridica/control.sock"
     capability_file: str | None = None
@@ -65,6 +91,7 @@ class Config:
     require_signoffs: bool = True
     people: dict[str, str] = field(default_factory=dict)  # Slack user id -> GitHub login
     llm_model: str = "haiku"
+    backend: Backend = field(default_factory=Backend)
 
     @property
     def socket_path(self) -> Path: return Path(os.path.expanduser(self.socket))
@@ -89,6 +116,14 @@ class Config:
         """Inverse of `to_dict` (the replay corpus stores the config as JSON)."""
         d = dict(d)
         d["board"] = Board(**d.get("board", {}))
+        b = dict(d.get("backend") or {})
+        bs = dict(b.get("bootstrap") or {})
+        if "keep_env" in bs:
+            if not isinstance(bs["keep_env"], (list, tuple)): raise ValueError("[backend.bootstrap] keep_env must be a list of environment variable names")
+            bs["keep_env"] = tuple(bs["keep_env"])
+        kind = str(b.get("kind", "fridica"))
+        if kind not in ("fridica", "bootstrap"): raise ValueError(f"[backend] kind must be fridica or bootstrap, not {kind!r}")
+        d["backend"] = Backend(kind, check_bootstrap(Bootstrap(**bs), d["board"].token_env))  # the replay path gets the same checks as `parse`
         d["reviewers"] = tuple(Reviewer(**r) for r in d.get("reviewers", ()))
         for k in ("channels", "starters", "audit_scopes"): d[k] = tuple(d.get(k, ()))
         return cls(**d)
@@ -117,7 +152,71 @@ def parse(text: str) -> Config:
         board=Board(bool(b.get("enabled", False)), str(b.get("owner", "")), int(b.get("number", 0)), str(b.get("repo", "")), str(b.get("token_env", "GH_TOKEN")), str(b.get("owner_type", "user"))),
         reviewers=reviewers, audit_scopes=scopes, require_signoffs=bool(a.get("require_signoffs", True)),
         people={str(k): str(v) for k, v in raw.get("people", {}).items()}, llm_model=str(raw.get("llm_model", "haiku")),
+        backend=_backend(raw.get("backend", {}), str(b.get("token_env", "GH_TOKEN"))),
     )
+
+
+def _backend(b: dict, token_env: str = "GH_TOKEN") -> Backend:
+    kind = str(b.get("kind", "fridica"))
+    if kind not in ("fridica", "bootstrap"): raise ValueError(f"[backend] kind must be fridica or bootstrap, not {kind!r}")
+    bs = b.get("bootstrap", {})
+    if str(bs.get("worker", "claude")) not in ("claude", "codex"): raise ValueError("[backend.bootstrap] worker must be claude or codex")
+    if str(bs.get("worker", "claude")) == "codex" and "max_cost_usd_per_study" not in bs:
+        raise ValueError(CODEX_CEILING)
+    d = Bootstrap()
+    budgets = {k: _budget(k, bs.get(k, getattr(d, k))) for k in ("max_budget_usd_per_job", "max_cost_usd_per_study")}
+    if isinstance(bs.get("retry_backoff"), bool): raise ValueError("[backend.bootstrap] retry_backoff must be a duration, not a boolean")
+    keep_env = bs.get("keep_env", [])
+    if not isinstance(keep_env, list): raise ValueError("[backend.bootstrap] keep_env must be a list of environment variable names")
+    return Backend(kind, check_bootstrap(Bootstrap(
+        journal_dir=str(bs.get("journal_dir", d.journal_dir)), worktrees_dir=str(bs.get("worktrees_dir", "")), worker=str(bs.get("worker", "claude")),
+        models={str(k): str(v) for k, v in bs.get("models", {}).items()}, efforts={str(k): str(v) for k, v in bs.get("efforts", {}).items()},
+        max_budget_usd_per_job=budgets["max_budget_usd_per_job"], max_cost_usd_per_study=budgets["max_cost_usd_per_study"],
+        subject_repo=str(bs.get("subject_repo", "")), subject_revision=str(bs.get("subject_revision", "HEAD")), workspace=str(bs.get("workspace", d.workspace)),
+        permission_mode=str(bs.get("permission_mode", d.permission_mode)), roles_dir=str(bs.get("roles_dir", "")), retry_backoff=duration(bs.get("retry_backoff"), d.retry_backoff),
+        keep_env=tuple(keep_env),
+    ), token_env))
+
+
+CODEX_CEILING = ("[backend.bootstrap] worker = \"codex\" needs max_cost_usd_per_study = 0 (no ceiling), stated explicitly: codex reports no cost and gets no "
+                 "--max-budget-usd, so each codex job is charged its max_budget_usd_per_job reservation as an estimate, not a measured or enforced "
+                 "cost, and no ceiling is applied to codex; or use worker = \"claude\"")
+# Names `keep_env` may not bring back into a worker's environment, in any case: the board's token_env and these (the driver's
+# own secrets, tokens, keys, personal access tokens, passwords, connection URLs and URIs that carry credentials). The worker
+# CLI's own credentials (`bootstrap.WORKER_CREDENTIALS`, e.g. ANTHROPIC_API_KEY) are allowlisted already and never needed here.
+# A kept name whose value turns out to be a URL with credentials in it is refused when the backend starts (`bootstrap.worker_env`).
+KEEP_ENV_FORBIDDEN = re.compile(r"^(FRIDICA_.*|SLACK_.*|.*TOKEN.*|.*SECRET.*|.*PASSWORD.*|.*_PAT|.*PWD|.*PASSWD|.*_KEY|.*_URI"
+                                r"|(.*_)?(DATABASE|DB|REDIS|MONGO|MONGODB|POSTGRES|POSTGRESQL|PG|MYSQL|AMQP|RABBITMQ|BROKER)_URL)$", re.IGNORECASE)
+
+
+def _budget(k: str, v) -> float:
+    """A budget in USD: a finite number >= 0 (nan, inf or a negative value would turn the ceiling check off silently; a boolean
+    or a string is not a number), as a float. `parse` and `Config.from_dict` both coerce through here."""
+    if isinstance(v, bool): raise ValueError(f"[backend.bootstrap] {k} must be a number, not a boolean ({v})")
+    if not isinstance(v, (int, float)): raise ValueError(f"[backend.bootstrap] {k} must be a number, not {v!r}")
+    try: f = float(v)
+    except OverflowError: raise ValueError(f"[backend.bootstrap] {k} must be a finite number, not {v!r}") from None
+    if not math.isfinite(f) or f < 0: raise ValueError(f"[backend.bootstrap] {k} must be a finite number >= 0 (0 = no ceiling for max_cost_usd_per_study), not {f}")
+    return f
+
+
+def check_bootstrap(bs: Bootstrap, token_env: str) -> Bootstrap:
+    """The `[backend.bootstrap]` rules, for `parse` and for `Config.from_dict` (the replay path) alike; the numeric fields come
+    back as floats (a string such as "50" is refused, never kept)."""
+    bs = replace(bs, **{k: _budget(k, getattr(bs, k)) for k in ("max_budget_usd_per_job", "max_cost_usd_per_study")})
+    rb = bs.retry_backoff
+    try: ok = not isinstance(rb, bool) and isinstance(rb, (int, float)) and math.isfinite(float(rb)) and rb >= 0
+    except OverflowError: ok = False
+    if not ok: raise ValueError(f"[backend.bootstrap] retry_backoff must be a finite duration >= 0, not {rb!r}")
+    bs = replace(bs, retry_backoff=float(rb))
+    if bs.worker not in ("claude", "codex"): raise ValueError("[backend.bootstrap] worker must be claude or codex")
+    if bs.worker == "codex" and float(bs.max_cost_usd_per_study) != 0: raise ValueError(CODEX_CEILING)
+    if float(bs.max_cost_usd_per_study) > 0 and float(bs.max_budget_usd_per_job) <= 0:  # the reservation and the charge of a costless failed job would be $0
+        raise ValueError(f"[backend.bootstrap] max_budget_usd_per_job must be > 0 when max_cost_usd_per_study is set ({bs.max_cost_usd_per_study:g}), not {bs.max_budget_usd_per_job:g}")
+    if not all(isinstance(k, str) for k in bs.keep_env): raise ValueError("[backend.bootstrap] keep_env must be a list of environment variable names")
+    bad = [k for k in bs.keep_env if k.upper() == token_env.upper() or KEEP_ENV_FORBIDDEN.match(k)]
+    if bad: raise ValueError(f"[backend.bootstrap] keep_env may not keep the board token or the driver's secrets: {', '.join(bad)}")
+    return bs
 
 
 def _reviewer(r) -> Reviewer:

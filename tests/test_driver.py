@@ -6,6 +6,7 @@ import os
 
 import pytest
 
+from fridica_research.backend.fridica import FridicaBackend
 from fridica_research.client import Client
 from fridica_research.config import Config
 from fridica_research.driver import Driver
@@ -31,7 +32,7 @@ def world(tmp_path, sock_dir):
 def make_driver(cfg: Config, store: Store | None = None, clock: Clock | None = None, llm=None) -> Driver:
     store = store or Store(cfg.state_file)
     if store.cursor is None: store.set_cursor(0)
-    return Driver(cfg, Client(cfg.socket_path), store, llm=llm or (lambda n, p: LLM[n]), clock=clock or Clock(), sleep=lambda s: None)
+    return Driver(cfg, FridicaBackend(Client(cfg.socket_path)), store, llm=llm or (lambda n, p: LLM[n]), clock=clock or Clock(), sleep=lambda s: None)
 
 
 def drain(drv: Driver, limit: int = 10):

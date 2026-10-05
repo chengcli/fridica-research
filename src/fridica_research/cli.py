@@ -7,24 +7,18 @@ import logging
 import sys
 
 from . import config, contracts
+from .backend import build_backend
 from .board import Board, role_totals
-from .client import Client, read_capability
 from .driver import Driver, claude_runner
 from .replay import replay
 from .store import Store
-
-
-def build_client(cfg: config.Config) -> Client:
-    token = read_capability(cfg.capability_file) if cfg.capability_file else None
-    return Client(cfg.socket_path, token)
 
 
 def cmd_start(cfg: config.Config, args) -> int:
     hours = args.projected_hours if args.projected_hours is not None else cfg.default_projected_hours
     ref = f"start/{args.channel}/g1"
     text = contracts.format_root(args.text, 1, None, hours, ref, tuple(r.handle for r in cfg.reviewers))
-    client = build_client(cfg)
-    r = client.post_root(args.channel, contracts.PostRequest("study_root", text))
+    r = build_backend(cfg).post(args.channel, contracts.PostRequest("study_root", text))
     if args.issue is not None:
         store = Store(cfg.state_file)
         store.set_meta(f"issue:{args.channel}", str(args.issue))
@@ -63,7 +57,7 @@ def cmd_serve(cfg: config.Config, args) -> int:
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(message)s")
     store = Store(cfg.state_file)
     board = Board(cfg, remember=store.set_meta, recall=store.get_meta, issue_numbers=_issue_numbers(store)) if cfg.board.enabled else None
-    Driver(cfg, build_client(cfg), store, llm=claude_runner(cfg.llm_model), board=board).serve(once=args.once)
+    Driver(cfg, build_backend(cfg), store, llm=claude_runner(cfg.llm_model), board=board).serve(once=args.once)
     return 0
 
 

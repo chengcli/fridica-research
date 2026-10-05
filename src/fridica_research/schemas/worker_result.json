@@ -1,0 +1,67 @@
+{
+  "title": "worker_result",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "status",
+    "summary",
+    "report",
+    "artifacts",
+    "unresolved"
+  ],
+  "properties": {
+    "status": {
+      "type": "string",
+      "enum": [
+        "done",
+        "partial",
+        "failed",
+        "needs_input"
+      ],
+      "description": "done: the task is complete; partial: some of it; failed: it could not be done; needs_input: a question for the owner is in `question`."
+    },
+    "summary": {
+      "type": "string",
+      "description": "One paragraph for the study thread (at most 1500 characters)."
+    },
+    "report": {
+      "type": "string",
+      "description": "The full report as the role prescribes, ending with the `## Stance` block (position/verdict/notes) or the `## Approaches` list when the brief asks for one."
+    },
+    "artifacts": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      },
+      "description": "URLs or paths produced: the pull request first when there is one."
+    },
+    "changes": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      },
+      "description": "Files changed, one path per entry."
+    },
+    "validation": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      },
+      "description": "Validation commands run, with their result."
+    },
+    "unresolved": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      },
+      "description": "What is left open; empty when status is done."
+    },
+    "question": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "description": "The question for the owner when status is needs_input."
+    }
+  }
+}

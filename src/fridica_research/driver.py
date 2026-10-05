@@ -3,8 +3,9 @@ events, run `step`, persist the snapshot, execute the actions.
 
 Every execution result becomes a machine event (`delegated`, `delegate_refused`, `llm_result`,
 `post_refused`), so the machine learns about the world only through events and the snapshot
-stays the fold of `step`. Restart is idempotent: the one `waiting` action is probed on
-GET /threads/<id> by its `ref:` line and re-sent only when absent; in-flight LLM calls are re-run;
+stays the fold of `step`. The world is a `DriverBackend` (R15): fridica's control socket or the
+bootstrap feed journal; the loop and the restart probe are the same over either. Restart is idempotent: the one `waiting` action is probed on
+the backend's thread view by its `ref:` line and re-sent only when absent; in-flight LLM calls are re-run;
 timers are re-armed from the absolute deadlines in the snapshot.
 """
 from __future__ import annotations
@@ -16,7 +17,7 @@ import time
 from typing import Callable
 
 from . import briefs, contracts, machine
-from .client import Client, ControlError, Unavailable
+from .backend import ControlError, DriverBackend, Unavailable, build_backend
 from .config import Config
 from .machine import Action, Event, State
 from .store import Store
@@ -37,14 +38,20 @@ def claude_runner(model: str = "haiku", run=subprocess.run) -> LlmRunner:
     return call
 
 
+def delegate_request(a: dict) -> contracts.DelegateRequest:
+    """The `delegate` action's data (an ActionId, the thread and the request body) back to the pinned request."""
+    return contracts.DelegateRequest(a["role"], a["brief"], a.get("context", "fresh"), a.get("worker_id"), bool(a.get("ephemeral", False)), a.get("backend", "same"), a.get("deliverable", "report"), tuple(a.get("tags") or ()))
+
+
 def thread_id(e: dict) -> str | None:
     root = e.get("thread")
     return f"{e.get('workspace', '')}:{e['channel']['id']}:{root}" if root and e.get("channel") else None
 
 
 class Driver:
-    def __init__(self, cfg: Config, client: Client, store: Store, llm: LlmRunner | None = None, board=None, clock=time.time, sleep=time.sleep):
-        self.cfg, self.client, self.store, self.clock, self.sleep = cfg, client, store, clock, sleep
+    def __init__(self, cfg: Config, backend: DriverBackend | None, store: Store, llm: LlmRunner | None = None, board=None, clock=time.time, sleep=time.sleep):
+        self.cfg, self.store, self.clock, self.sleep = cfg, store, clock, sleep
+        self.backend = backend if backend is not None else build_backend(cfg)
         self.llm = llm or claude_runner(cfg.llm_model)
         self.board = board
         self.recovered = False
@@ -101,16 +108,19 @@ class Driver:
         """Today's `job` event carries no result; join it with GET /threads/<id> jobs[]."""
         d = {"job_id": e["job_id"], "attempt": e.get("attempt", 1), "job_status": e.get("action"), "code": e.get("code"), "worker_id": e.get("worker_id", ""), "role": "", "join_group": ""}
         try:
-            for j in self.client.thread(thread).jobs:
+            for j in self.thread_view(thread).jobs:
                 if j.get("id") == e["job_id"]:
                     d.update(worker_id=j.get("worker_id", d["worker_id"]), role=j.get("role", ""), join_group=j.get("inbox_id") or "", result=j.get("result"))
         except ControlError as err:
             log.warning("thread view unavailable for %s: %s", thread, err)
         return d
 
+    def thread_view(self, thread: str) -> contracts.ThreadView: return contracts.ThreadView.from_json(self.backend.thread_view(thread))
+
     # -- one event through the machine ---------------------------------------------
     def apply(self, thread: str, ev: Event, cursor: int | None = None) -> State:
         state = self.store.load(thread)
+        was_terminal = state is not None and state.stage in machine.TERMINAL
         if ev.kind == "started":
             if state is not None: return state
             state, actions = machine.start(thread, ev["channel"], ev["problem"], ev.now, generation=ev["generation"], lineage=ev["lineage"], spawner=ev["spawner"], projected_hours=ev["projected_hours"], cfg=self.cfg)
@@ -120,25 +130,27 @@ class Driver:
         for a in actions: log.info("%s %s %s", thread, a.kind, a.id)
         for follow in [x for a in actions for x in self.execute(state, a)]:
             state = self.apply(thread, follow)
+        if state.stage in machine.TERMINAL and not was_terminal:
+            try: self.backend.release(thread)
+            except ControlError as e: log.warning("release %s failed: %s", thread, e)
         return state
 
     def execute(self, state: State, a: Action) -> list[Event]:
         now = self.clock()
         try:
             if a.kind == "delegate":
-                body = {k: v for k, v in a.data.items() if k not in ("thread", "action_id")}
-                r = self.client.delegate(state.thread, body)
+                r = self.backend.delegate(state.thread, delegate_request(a.data))
                 jobs = r.get("jobs") or []
                 return [Event("delegated", now, {"action_id": a.id, "join_group": r.get("join_group", ""), "jobs": jobs})]
             if a.kind == "post":
-                self.client.post_message(state.thread, contracts.PostRequest(a["post_kind"], a["text"], a.get("details")))
+                self.backend.post(state.thread, contracts.PostRequest(a["post_kind"], a["text"], a.get("details")))
             elif a.kind == "stop_worker":
-                self.client.stop_worker(state.thread, a["worker_id"])
+                self.backend.stop(state.thread, a["worker_id"])
             elif a.kind == "set_driver":
-                self.client.set_driver(state.thread, a["driver"])
+                self.backend.set_driver(state.thread, a["driver"])
             elif a.kind == "notify_owner":
                 text = f"<@{self.cfg.owner}> {a['text']}\nref: {a.id}"
-                self.client.post_message(state.thread, contracts.PostRequest("report", text))
+                self.backend.post(state.thread, contracts.PostRequest("report", text))
             elif a.kind == "llm_call":
                 return [self.run_llm(a.id, a["name"], a["prompt"])]
             elif a.kind == "board_update" and self.board is not None:
@@ -174,7 +186,7 @@ class Driver:
         for s in self.store.all():
             w = s.waiting
             if not w or s.stage in machine.TERMINAL: continue
-            try: view = self.client.thread(s.thread)
+            try: view = self.thread_view(s.thread)
             except ControlError as e:
                 log.warning("cannot probe %s: %s", s.thread, e)
                 continue
@@ -205,7 +217,7 @@ class Driver:
         """Commands, one page of the feed, due timers. Returns (feed events applied, page reached the ledger's end)."""
         if not self.recovered: self.recover()
         self.commands()
-        try: page = self.client.events(self.store.cursor, 1000)
+        try: page = self.backend.events(self.store.cursor, 1000)
         except Unavailable as e:
             log.warning("daemon unavailable: %s", e)
             return 0, True

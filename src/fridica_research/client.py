@@ -15,18 +15,10 @@ import stat
 from pathlib import Path
 
 from . import contracts
+from .backend.protocol import ControlError, Unavailable
 
+__all__ = ["Client", "ControlError", "Unavailable", "read_capability"]
 _HEX64 = re.compile(r"^[0-9a-f]{64}$")
-
-
-class ControlError(Exception):
-    def __init__(self, status: int, code: str):
-        super().__init__(f"{status} {code}")
-        self.status, self.code = status, code
-
-
-class Unavailable(ControlError):
-    def __init__(self, why: str): super().__init__(0, why)
 
 
 class _UnixConnection(http.client.HTTPConnection):
@@ -86,5 +78,5 @@ class Client:
     def delegate(self, thread: str, body: dict) -> dict: return self.post(contracts.delegate_route(thread), body)
     def post_message(self, thread: str, req: contracts.PostRequest) -> dict: return self.post(contracts.post_route(thread), req.body())
     def post_root(self, channel: str, req: contracts.PostRequest) -> dict: return self.post(contracts.STUDY_ROOT_ROUTE.format(channel=channel), req.body())
-    def stop_worker(self, thread: str, worker_id: str) -> dict: return self.post(contracts.stop_route(thread, worker_id), {"actor": "owner"})
+    def stop_worker(self, thread: str, worker_id: str, actor: str = "owner") -> dict: return self.post(contracts.stop_route(thread, worker_id), {"actor": actor})
     def set_driver(self, thread: str, driver: str) -> dict: return self.post(contracts.driver_route(thread), {"driver": driver})

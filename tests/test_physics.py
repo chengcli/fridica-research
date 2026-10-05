@@ -7,6 +7,7 @@ import os
 
 import pytest
 
+from fridica_research.backend.fridica import FridicaBackend
 from fridica_research.client import Client
 from fridica_research.driver import Driver
 from fridica_research.store import Store
@@ -29,7 +30,7 @@ def world(tmp_path, sock_dir):
 def driver(cfg, store=None, clock=None):
     store = store or Store(cfg.state_file)
     if store.cursor is None: store.set_cursor(0)
-    return Driver(cfg, Client(cfg.socket_path), store, llm=lambda n, p: LLM[n], clock=clock or Clock(), sleep=lambda s: None)
+    return Driver(cfg, FridicaBackend(Client(cfg.socket_path)), store, llm=lambda n, p: LLM[n], clock=clock or Clock(), sleep=lambda s: None)
 
 
 def to_mid_debate2(server, cfg, drv, thread):

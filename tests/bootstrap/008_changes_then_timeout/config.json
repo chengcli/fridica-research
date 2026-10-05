@@ -6,6 +6,25 @@
   ],
   "auditor_backend": "other",
   "auto_followon": true,
+  "backend": {
+   "bootstrap": {
+    "efforts": {},
+    "journal_dir": "~/.local/state/fridica-research/journal",
+    "keep_env": [],
+    "max_budget_usd_per_job": 5.0,
+    "max_cost_usd_per_study": 50.0,
+    "models": {},
+    "permission_mode": "bypassPermissions",
+    "retry_backoff": 30.0,
+    "roles_dir": "",
+    "subject_repo": "",
+    "subject_revision": "HEAD",
+    "worker": "claude",
+    "workspace": "journal",
+    "worktrees_dir": ""
+   },
+   "kind": "fridica"
+  },
   "board": {
    "enabled": false,
    "number": 0,

@@ -73,7 +73,94 @@ fridica-research note <thread> "R9: ..."     # a mid-stage change: a finding for
 
 Needs fridica with the #126 external-driver surface (PR B: `POST /threads/<id>/delegate`,
 `/post`, `/workers/<w>/stop`, `threads.driver=external`). The contracts are pinned in
-`contracts.py`; until PR B lands, the package is exercised against the fake server in `tests/`.
+`contracts.py`; until PR B lands, the package is exercised against the fake server in `tests/`
+or run without fridica on the bootstrap backend below.
+
+## Running without fridica: the bootstrap backend
+
+`[backend] kind = "bootstrap"` replaces the control socket with a local feed journal and
+subprocess workers (R15, [docs/protocol.md](docs/protocol.md)). Posts go into
+`<journal_dir>/journal.jsonl` and come back through the same file as the feed; workers are
+`claude -p` (or `codex exec`) runs in a detached git worktree of the subject revision, one per
+worker id. Add to `research.toml`:
+
+```toml
+[backend]
+kind = "bootstrap"                  # fridica (default) | bootstrap
+
+[backend.bootstrap]
+journal_dir = "~/.local/state/fridica-research/journal"   # one study lineage per journal
+# worktrees_dir = "<journal_dir>/worktrees"
+worker = "claude"                   # claude | codex
+subject_repo = "~/src/fridica-research"   # workers run in `git worktree add --detach <worktrees>/<worker id> <subject_revision>`
+subject_revision = "HEAD"
+max_budget_usd_per_job = 5          # claude --max-budget-usd
+max_cost_usd_per_study = 50         # finished jobs' total_cost_usd + max_budget_usd_per_job per job in flight; a delegate past it is refused (rule R -> Blocked); 0 = no ceiling, required (explicitly) with worker = "codex": codex reports no cost and gets no --max-budget-usd, so each codex job is charged its reservation as an estimate
+permission_mode = "bypassPermissions"   # the worker is unattended inside its worktree
+# roles_dir = "~/src/fridica/assets/roles"   # <role>.md appended to the worker's system prompt (R5)
+# retry_backoff = "30s"             # before a re-run of the same ActionId; doubles per retry
+
+[backend.bootstrap.models]          # per role; omitted roles use claude's default
+explorer = "haiku"
+implementer = "opus"
+
+[backend.bootstrap.efforts]         # claude --effort per role
+implementer = "high"
+```
+
+```sh
+fridica-research --config research.toml start C1 "Study X" --projected-hours 3   # the root is line 1 of the journal
+fridica-research --config research.toml serve                                     # reads the journal from line 1, runs the stages
+```
+
+Peers' claims and `SIGN-OFF` lines cannot arrive from Slack on this backend (there is no
+Slack egress or ingress without fridica); with `require_signoffs = true` the audit stage waits
+for the stage timeout, with it false the local auditor worker decides. To try the loop with a
+fake claude, put a `claude` script first on `PATH` that prints one claude result object
+(`{"type": "result", "session_id": ..., "total_cost_usd": 0, "structured_output": {WorkerResult}}`);
+`tests/test_bootstrap_backend.py` does this in-process with a fake runner. Every file the
+backend writes under `journal_dir` (the journal, `results/` including codex's
+`--output-last-message` file, `sessions/`, `workers/`, `runs/`) is redacted before it is
+written: `sk-` not preceded by a letter or digit (and `sk-ant-`, `KEY_sk-proj-...`), `ghp_`/`gho_`/`ghs_`/`ghu_`/`ghr_`/`github_pat_`,
+`xoxa-`/`xoxb-`/`xoxe-`/`xoxo-`/`xoxp-`/`xoxr-`/`xoxs-`/`xapp-`, `Bearer <token>` (any case),
+`AKIA...` AWS key ids and `-----BEGIN ... PRIVATE KEY-----` blocks; the brief is kept only in
+the redacted journal line. Workers get an allowlisted environment, not a scrubbed one: only
+`PATH`, `HOME`, `USER`, `LOGNAME`, `SHELL`, `LANG`, the POSIX locale names (`LC_ALL`, `LC_CTYPE`,
+`LC_COLLATE`, `LC_MESSAGES`, `LC_MONETARY`, `LC_NUMERIC`, `LC_TIME`; no other `LC_` name), `TERM`, `TMPDIR`, `TZ`, the worker
+CLI's own credentials (`ANTHROPIC_API_KEY`, `ANTHROPIC_AUTH_TOKEN`, `CLAUDE_CODE_OAUTH_TOKEN` for
+claude; `OPENAI_API_KEY`, `CODEX_API_KEY` for codex; claude's OAuth login in `~/.claude` needs
+none of them), the non-secret Bedrock/Vertex settings (`AWS_REGION`, `AWS_DEFAULT_REGION`,
+`AWS_PROFILE`, `GOOGLE_APPLICATION_CREDENTIALS`, `CLAUDE_CODE_USE_BEDROCK`,
+`CLAUDE_CODE_USE_VERTEX`, `CLOUD_ML_REGION`, `ANTHROPIC_VERTEX_PROJECT_ID`) and the names in
+`[backend.bootstrap] keep_env = ["NAME", ...]` reach a worker; everything else is dropped, and
+the board's `token_env` never reaches it. `keep_env` may not name, in any letter case, the board's
+`token_env`, `FRIDICA_*`, `SLACK_*`, `*TOKEN*`, `*SECRET*`, `*PASSWORD*`, `*_PAT`, `*PWD`, `*PASSWD`,
+`*_KEY`, `*_URI` or a database/broker URL (`DATABASE_URL`, `*_DB_URL`, `REDIS_URL`, ...) (the worker
+CLI's own credentials are allowlisted already), and a kept
+variable whose value is a URL with credentials (`scheme://user:password@host`) is refused when
+the backend starts. The allowlist covers variables only: `HOME` is
+kept (claude's login lives under it), so file-based credentials under `HOME` (`~/.ssh`,
+`~/.aws`, `~/.config/gh`, `~/.netrc`, ...) stay readable by a worker running as the same user;
+run the driver as a dedicated user if that matters. Every job is charged by one rule: the
+`total_cost_usd` the worker reported when it is a finite number >= 0, whatever the job's status
+(finished, failed, stopped, timed out); otherwise its full `max_budget_usd_per_job` when its
+worker was spawned (so a killed `claude -p` that printed nothing, or a NaN, infinite or
+negative cost, costs the reservation); 0 when the worker was never spawned (stopped in its
+backoff, a launch error). A cost that cannot be read as a float (a 401-digit integer) is
+unknown, never an error. Codex reports no cost, so a codex job's `total_cost_usd` is always an
+estimate (its reservation). A ceiling of nan, inf or a negative number is a config error
+(exactly 0 means no ceiling). Each worker is started held: its process group, its leader's
+start time and its absolute deadline are written to `runs/<ActionId>-a<attempt>.json` before
+it is released to run (a driver that dies first leaves a held process that exits unrun), so a
+driver restarted after a crash kills workers that outlived it past their deadline (only while
+the group's leader is still that process); a study's worktrees are removed (`git worktree
+remove --force`) when it reaches Delivered or Stopped (Blocked keeps them for the resume; one
+with a job, or a live orphan of a crashed driver, still running in it goes when that job
+ends). After a crash, a retry of an ActionId whose orphaned worker is still alive waits until
+that orphan ends or is killed at its deadline; an orphan whose liveness cannot be checked
+(`ps` failed) counts as alive, past its deadline too: its run file stays until its group is confirmed
+dead (killed, or `ps` reports it gone) and the kill is retried on every poll, so two workers never `--resume` the same claude session. The bootstrap backend is
+frozen after the promotion of R2.
 
 ## Architecture
 
@@ -95,8 +182,9 @@ Needs fridica with the #126 external-driver surface (PR B: `POST /threads/<id>/d
 - `machine.py`: the pure stage machine (claim states, retry rule, debate rounds, follow-on lineage).
 - `contracts.py`: the pinned routes, event shapes and text-line formats (`ref:`, claims, roots, `## Stance`).
 - `briefs.py` + `schemas/`: brief templates and the three LLM JSON schemas, with a size guard.
+- `backend/`: the `DriverBackend` protocol (R15), `fridica.py` over `client.py`, `bootstrap.py` (the feed journal and subprocess workers).
 - `driver.py`, `client.py`, `store.py`, `board.py`, `config.py`, `cli.py`.
-- [docs/protocol.md](docs/protocol.md): the protocol R1-R14 as the driver runs it.
+- [docs/protocol.md](docs/protocol.md): the protocol R1-R15, R19 and R25 as the driver runs it.
 
 ## First study
 
@@ -119,7 +207,9 @@ Tests: the stage table (`test_machine.py`), the physicist's discriminating tests
 (`test_physics.py`: restart equivalence, claim ordering, progress notes, slot refusal, egress-refused
 deliverable), the driver against a fake control server over a Unix socket (`test_driver.py`,
 `fake_control.py`), the board with a fake `gh` (`test_board.py`), config, CLI, contracts, the
-fold-equivalence check (`test_rebuild.py`) and the bootstrap tape.
+fold-equivalence check (`test_rebuild.py`), the bootstrap tape, the replay corpus (`test_replay.py`)
+and the bootstrap backend (`test_bootstrap_backend.py`: swap-equivalence with the fake server on
+corpus 000, the journal's single writer, the 2x kill, the cost ceiling, redaction, session resume).
 
 ## Known limitations
 
@@ -128,3 +218,9 @@ fold-equivalence check (`test_rebuild.py`) and the bootstrap tape.
 - The board never writes Status `Todo`: no card is created ahead of its stage.
 - Slug equivalence across different explorers is by exact name only.
 - Owner-stop does not post a `released` claim; peers keep treating the slug as taken.
+- The bootstrap backend has no Slack: no peer claims or sign-offs arrive, and `backend = "other"`
+  on the auditor delegate is ignored (every worker is the configured `worker`). `codex` workers
+  are not resumed across rounds (no session id up front) and report no cost, so
+  `worker = "codex"` needs `max_cost_usd_per_study = 0` (no ceiling) stated explicitly in
+  `research.toml`; anything else is refused at config load.
+- The bootstrap worker keeps `HOME`: file-based credentials under it are reachable from a worker.

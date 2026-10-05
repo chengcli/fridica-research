@@ -850,6 +850,25 @@ def test_merge_policy_has_no_conflicting_human_decision_rule():
         assert match is None, f"{path}: {match.group()}"
 
 # -- #37: late reviews after a reopened Deliver, carry order after a retry -------------------------------------------
+def test_issue30_2_a_failed_acknowledgement_survives_a_later_approval_by_the_same_reviewer():
+    """#30 item 2: already holds since #24 keys every acknowledgement by review id; kept as a regression test."""
+    late = rv(9, "reviewer", "CHANGES_REQUESTED", at="2026-10-04T13:00:00Z", body="- rename foo\n")
+    gh = FakeGh((PR, {"state": "MERGED", "mergedAt": MERGED_AT, "mergeCommit": {"oid": SQUASH}, "reviews": [late]}))
+    g, _ = make(gh)
+    w = audit_world()
+    w.ev("sign_off", sender=REV, pr=PR, sha=SHA, verdict="approve")
+    gh.fail_once(lambda a: "repos/o/r/issues/9/comments" in a)
+    t0 = w.now
+    poll(g, w, t0)
+    gh.prs[("o/r", "9")]["reviews"].append(rv(10, "reviewer", "APPROVED", at="2026-10-04T14:00:00Z"))
+    out = poll(g, w, t0 + 600)
+    poll(g, w, t0 + 1200)
+    assert [d for _, d in gh.api("repos/o/r/issues/9/comments")] == [{"body": "@reviewer acknowledged, goes into the next PR."}] * 2  # the failed reply, then exactly one
+    assert ("ack-9", "acknowledged, goes into the next PR: post-merge review by reviewer on o/r#9") in out.posts
+    assert sum(f.endswith("post-merge review by reviewer on o/r#9: rename foo") for f in w.state.findings) == 1 and g.carried("o/r") == {"reviewer": ["rename foo"]}
+    assert ("review-10", f"SIGN-OFF (GitHub review, mirrored) reviewer: APPROVED on o/r#9 at {HEAD[:12]} (after merge)") in out.posts and "10" in [i.key for i in out.items]
+
+
 def test_issue37_1_a_late_review_after_a_late_changes_review_reopened_deliver_is_collected():
     gh = FakeGh((PR, {"reviews": [rv(1, "reviewer", "APPROVED")]}))
     g, _ = make(gh)

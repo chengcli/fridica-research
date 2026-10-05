@@ -848,3 +848,37 @@ def test_merge_policy_has_no_conflicting_human_decision_rule():
     for path in ("docs/protocol.md", "src/fridica_research/roles/auditor.md"):
         match = re.search(forbidden, (root / path).read_text(), re.I)
         assert match is None, f"{path}: {match.group()}"
+
+# -- #37: late reviews after a reopened Deliver, carry order after a retry -------------------------------------------
+def test_issue37_1_a_late_review_after_a_late_changes_review_reopened_deliver_is_collected():
+    gh = FakeGh((PR, {"reviews": [rv(1, "reviewer", "APPROVED")]}))
+    g, _ = make(gh)
+    w = held_world()
+    poll(g, w)  # approved: the study is in Deliver and the driver merged
+    assert w.state.stage == "Deliver" and gh.prs[("o/r", "9")]["state"] == "MERGED"
+    rs = gh.prs[("o/r", "9")]["reviews"]
+    rs.append(rv(9, "reviewer", "CHANGES_REQUESTED", at="2026-10-04T13:00:00Z", body="- rename foo"))
+    poll(g, w)
+    assert w.state.stage == "Explore" and w.state.iteration == 2  # the late changes request reopened the study
+    rs.append(rv(10, "reviewer", "CHANGES_REQUESTED", at="2026-10-04T14:00:00Z", body="- add a test"))
+    out = poll(g, w)
+    ack = "acknowledged, goes into the next PR: post-merge review by reviewer on o/r#9"
+    assert ("ack-10", ack) in out.posts and ("review-10", f"SIGN-OFF (GitHub review, mirrored) reviewer: CHANGES_REQUESTED on o/r#9 at {HEAD[:12]} (after merge)") in out.posts
+    assert [d["body"] for _, d in gh.api("repos/o/r/issues/9/comments")] == ["@reviewer acknowledged, goes into the next PR."] * 2
+    assert g.carried("o/r") == {"reviewer": ["rename foo", "add a test"]}
+    assert any(f.endswith("post-merge review by reviewer on o/r#9: add a test") for f in w.state.findings)
+
+
+def test_issue37_2_items_carried_after_a_retried_acknowledgement_keep_the_review_order():
+    gh = FakeGh((PR, {"state": "MERGED", "mergedAt": MERGED_AT, "mergeCommit": {"oid": SQUASH}, "reviews": [
+        rv(9, "reviewer", "CHANGES_REQUESTED", at="2026-10-04T13:00:00Z", body="- first"), rv(10, "reviewer", "CHANGES_REQUESTED", at="2026-10-04T14:00:00Z", body="- second")]}))
+    g, _ = make(gh)
+    w = audit_world()
+    w.ev("sign_off", sender=REV, pr=PR, sha=SHA, verdict="approve")
+    gh.fail_once(lambda a: "repos/o/r/issues/9/comments" in a)  # the reply to review 9 fails, the one to review 10 succeeds
+    t0 = w.now
+    poll(g, w, t0)
+    poll(g, w, t0 + 600)  # review 9's reply is retried after the backoff
+    assert len(gh.api("repos/o/r/issues/9/comments")) == 3
+    assert g.carried("o/r") == {"reviewer": ["first", "second"]}  # the order the reviews were submitted in
+    assert "## From post-merge review by reviewer\n- first\n- second" in g.next_pr_body("o/r", "Next change.", 21, w.state.thread, 2)

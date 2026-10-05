@@ -376,9 +376,11 @@ other reviewers when its PR merges, and their reviews keep closing their cards.
 
 Only the PR's assigned auditor is requested on a PR; the merge gate is that auditor's approval on the
 current head (bots such as copilot, the PR's author and every other account never count). A merged PR stays polled
-for `post_merge_window` (default 7 days) after `mergedAt`. A `CHANGES_REQUESTED` review by a configured
-reviewer submitted after the merge is acknowledged automatically (once: the reply, the carry and the
-thread line are each recorded as done; a review is marked seen only once the reply succeeded, so a
+for `post_merge_window` (default 7 days) after `mergedAt`, also after a late `changes` reopened its study
+from Deliver (in every stage but Blocked and Stopped, while that PR is still the study's). A `CHANGES_REQUESTED` review by the PR's assigned
+auditor submitted after the merge is acknowledged automatically (once: the reply, the carry and the
+thread line are each recorded as done; the items are carried before the reply is tried, so they keep the
+order the reviews were submitted in when a reply is retried; a review is marked seen only once the reply succeeded, so a
 failed reply is tried again on a later poll, at most `ack_tries` times (default 5) with `ack_backoff`
 (default 10 min) before the first retry, doubling after each failure; after the last failed try the reply
 is a finding (`the reply to the post-merge review by <login> on <repo>#<n> failed <k> times and is not

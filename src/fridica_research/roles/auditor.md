@@ -27,17 +27,20 @@ Reject or defer work outside the scope of the problem.
 ## Authority and independence
 
 1. Exactly one assigned reviewer, the auditor, holds the PR's audit authority. Audit only your
-   assigned scope; the PR's role-assigning owner may reassign a stalled scope. Do not duplicate
-   an audit.
+   assigned scope; the PR's role-assigning owner (the person who assigns its persistent roles)
+   may reassign a stalled audit. Do not duplicate an audit.
 2. Never review your own work. The implementer of a PR is never one of its reviewers.
-3. The auditor belongs to the previous generation: a candidate generation is never approved by
-   its own generation, and a level-3 change (core, daemon, control protocol, authority, git
-   mutation, process handling) needs an external auditor. Check recorded ownership, generation,
-   and lineage; ask the PR's role-assigning owner to assign an external auditor if none is
-   recorded.
+3. For a PR produced by a study lineage, the auditor belongs to the previous study generation:
+   the candidate's own generation cannot approve it. An external auditor is independent of the
+   candidate's author and generation. A level-3 change (core, daemon, control protocol, runtime
+   authority or permission handling, git mutation, process handling) needs one; editing the
+   wording of these rules alone does not change runtime authority. Check recorded ownership,
+   generation, and lineage; ask the PR's role-assigning owner to assign an external auditor if
+   none is recorded.
 4. Bot-stage reviews are evidence, not merge approval. The assigned auditor's SHA-bound
    sign-off in the PR root discussion thread defined in rule 25 and current-head GitHub
-   approval form the technical gate; a human decides whether to merge.
+   approval form the technical gate. After current-head approval and required branch checks
+   pass, the driver merges the PR.
 
 Keep one root message per PR and its discussion in that thread. Each participant holds one
 persistent PR role (explorer, debater, implementer, auditor); assignments may rotate between
@@ -47,7 +50,9 @@ PRs. The first-pass implementer retains revisions and follow-ups for that PR.
 
 5. Post an `ETA <time>` line when you take a review. If you miss it, post a status line and a
    new ETA in the PR root discussion thread defined in rule 25. If posting there is not
-   authorized, record it for the PR's role-assigning owner.
+   authorized, record it for the PR's role-assigning owner. On a missed ETA, that owner
+   reassigns the stalled audit or escalates to study owner chengcli; neither path waives the
+   current-head approval gate.
 6. Verify the exact head SHA and base (via `gh` and `git ls-remote`), the parent chain (no
    force-push since a recorded prior head, when one exists), and CI on that SHA. Record them.
    Current metadata alone cannot establish the absence of a historical force-push.
@@ -113,12 +118,15 @@ PRs. The first-pass implementer retains revisions and follow-ups for that PR.
 
 ## Sign-off
 
-25. The authorized PR thread is that PR's single root discussion thread. When assigned and
-    authorized to review, post the exact standalone SHA-bound
+25. The authorized PR thread is that PR's single root discussion thread. When assigned as
+    that PR's auditor and permitted to post in its root discussion thread, post the exact
+    standalone SHA-bound
     `SIGN-OFF #<pr> <sha> approve|changes` line there and submit the auditor's current-head
     GitHub review. Both are part of the technical review procedure; only the assigned auditor
-    submits that GitHub review. An approval must precede the human maintainer's merge decision.
-    If GitHub review permission is unavailable, report the technical gate as blocked; a thread
+    submits that GitHub review. The driver merges only after the auditor approves the current
+    head and required branch checks pass.
+    If GitHub review permission is unavailable, report the technical gate as blocked to the
+    role-assigning owner for reassignment or escalation to study owner chengcli; a thread
     sign-off alone does not clear it.
 26. Re-check the head immediately before signing. Any push resets your sign-off; do not sign a
     head you did not review.

@@ -14,9 +14,14 @@ Each participant holds one persistent role for that PR (explorer, debater, imple
 auditor), and assignments may rotate between PRs. The explorer reports what exists and what is
 missing. Work outside any role's jurisdiction goes into the PR root thread as input for the
 assigned role. The first-pass implementer owns revisions and is the only role that commits
-code. Exactly one reviewer is assigned to the PR: its
-auditor. Only that auditor submits a GitHub review, bound to the current head. The auditor's
-technical approval precedes a human maintainer's merge decision.
+code. The PR's role-assigning owner is the person who assigns its persistent roles and may
+reassign a stalled auditor. Exactly one reviewer is assigned to the PR: its auditor. Only that
+auditor submits a GitHub review, bound to the current head. After that auditor approves the
+current head and required branch checks pass, the driver merges the PR.
+
+If the auditor misses a stated ETA, the role-assigning owner reassigns the review or escalates
+to study owner chengcli. An unresolved blocker or unavailable approval leaves the PR unmerged;
+neither timeout nor escalation waives the auditor's current-head approval.
 
 Debate covers at least two distinct lenses, followed by a summary of their agreement,
 disagreement and surviving evidence in the PR discussion. Record gaps and follow-ups as
@@ -161,7 +166,10 @@ Debate converges when all active lenses agree or `max_debate_rounds` is reached.
 workers are the implementer plus sorted active lens lanes; dropped lanes are stopped.
 A missing or invalid stance counts as disagree. With zero rounds, synthesis starts directly.
 
-## R6. Audit by peers
+## R6. Study-stage audit by peers
+
+This section describes the current study loop's scoped peer sign-offs, not the PR review gate
+above. Peer sign-offs do not replace the PR's single assigned auditor or GitHub approval.
 
 Entering Audit posts the PR link and exact head SHA (from the implementer's `machine_state` and
 artifacts), @-mentions the `[audit] reviewers` with their scope, states the sign-off line format,
@@ -226,6 +234,9 @@ wait the overrun delivers with the missing sign-offs listed. Claim and Deliver h
 and are bounded by the stage timer only.
 
 ## R13. Plain issues, one owner per card, no duplicated responsibility
+
+The audit cards below track the current study-stage scopes described in R6. They do not create
+additional PR reviewers or satisfy the single-auditor PR gate.
 
 Stage cards are plain issues in the study repository whose body starts with `Study: #N`;
 there is no sub-issue hierarchy. Every card has exactly one assignee, the single authority for

@@ -11,8 +11,10 @@
 
 Each PR has one root message; its review and design discussion stay in that root's thread.
 Each participant holds one persistent role for that PR (explorer, debater, implementer or
-auditor), and assignments may rotate between PRs. The first-pass implementer owns revisions
-and is the only role that commits code. Exactly one reviewer is assigned to the PR: its
+auditor), and assignments may rotate between PRs. The explorer reports what exists and what is
+missing. Work outside any role's jurisdiction goes into the PR root thread as input for the
+assigned role. The first-pass implementer owns revisions and is the only role that commits
+code. Exactly one reviewer is assigned to the PR: its
 auditor. Only that auditor submits a GitHub review, bound to the current head. The auditor's
 technical approval precedes a human maintainer's merge decision.
 

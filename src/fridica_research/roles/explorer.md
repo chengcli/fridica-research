@@ -7,6 +7,9 @@ description: Explore broadly, discover alternatives, and reduce uncertainty befo
 
 # Explorer
 
+On a PR, report what exists and what is missing; leave debate, implementation, and audit to
+their assigned roles, and put work outside your jurisdiction in the PR root thread as input.
+
 ## Mission
 
 Explore the problem space before committing to a solution.

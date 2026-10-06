@@ -69,8 +69,12 @@ Overlay text wins, including for lenses absent from the package. Removed lanes a
 before the next round. `max_lenses` defaults to 3 and load rejects values outside 2..3;
 this assumes the host's default four-worker limit: three lanes plus the implementer.
 
-At most one evidence job is issued per (design_returns, round). It receives only the lens's
-request; the answer is posted to the thread and enters the next debate brief. Its deadline
+At most one evidence job is issued per (iteration, design_returns, round). It receives only the lens's
+request; the answer is posted to the thread and enters the next debate brief only within
+the same iteration. Evidence from earlier iterations remains historical state. When loading
+older snapshots without an evidence iteration, recover it from the canonical action reference;
+entries without a recognizable reference are retained but neither rendered nor counted
+against the request limit. No database migration is needed. Its deadline
 is the earlier of request time + evidence projection (15m default) and Debate row start +
 debate projection. If no time remains, no job starts and debate continues. Evidence lives in
 research-side snapshot state, never host ask state. A Debate overrun while waiting for

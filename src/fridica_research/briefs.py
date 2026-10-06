@@ -63,11 +63,11 @@ def explorer(ref: str, problem: str, brief: str, questions: list[str], findings:
     ], findings)
 
 
-def debate(ref: str, role: str, others: list[str], problem: str, approach: contracts.Approach, explorer_report: str, prior: dict[str, str], round_: int, findings: list[str], lenses: dict[str, str] | None = None, evidence: list[dict] = (), design_return: str = "") -> str:
+def debate(ref: str, role: str, others: list[str], problem: str, approach: contracts.Approach, explorer_report: str, prior: dict[str, str], round_: int, findings: list[str], lenses: dict[str, str] | None = None, evidence: list[dict] = (), design_return: str = "", *, iteration: int = 1) -> str:
     sections = [("Role", instructions("debater", role, lenses)), ("Study", problem), ("Approach under study", f"{approach.slug}: {approach.title}\n{approach.why}"), ("Explorer report", explorer_report)]
     if design_return: sections.append(("Design audit return", design_return))
     for entry in evidence:
-        if entry.get("answer"): sections.append((f"Evidence answer (return {entry['design_returns']}, round {entry['round']}, {entry['lens']})", entry["answer"]))
+        if entry.get("iteration") == iteration and entry.get("answer"): sections.append((f"Evidence answer (return {entry['design_returns']}, round {entry['round']}, {entry['lens']})", entry["answer"]))
     if round_ > 1:
         for other in others: sections.append((f"Round {round_}: the {other}'s report from the previous round", prior.get(other, "(none)")))
         sections.append(("Your previous report", prior.get(role, "(none)")))

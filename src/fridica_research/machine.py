@@ -119,7 +119,15 @@ class State:
 
     def to_dict(self) -> dict: return asdict(self)
     @classmethod
-    def from_dict(cls, d: dict) -> "State": return cls(**d)
+    def from_dict(cls, d: dict) -> "State":
+        state = cls(**copy.deepcopy(d))
+        # Pre-iteration evidence snapshots already carry iteration in their action ref.
+        pattern = re.escape(state.thread) + r"/g[1-9]\d*/i([1-9]\d*)/Debate/a[1-9]\d*/(?:r\d+/)?evidence-\d+-[^/]+"
+        for entry in state.evidence:
+            if "iteration" not in entry:
+                match = re.fullmatch(pattern, entry.get("ref", ""))
+                if match: entry["iteration"] = int(match[1])
+        return state
 
     def approach(self) -> contracts.Approach:
         slug = (self.claim or {}).get("slug", "")
@@ -311,7 +319,7 @@ class M:
         prior = {r: v.get("report", "") for r, v in s.reports.items()}
         jobs, lane_briefs = {}, {}
         for role in self.lanes():
-            lane_briefs[role] = briefs.debate(self.rid(f"debate-{s.round}-{role}"), role, [r for r in self.lanes() if r != role], s.problem, s.approach(), s.explorer_report, prior, s.round, s.findings, s.lenses, s.evidence, s.design_return)
+            lane_briefs[role] = briefs.debate(self.rid(f"debate-{s.round}-{role}"), role, [r for r in self.lanes() if r != role], s.problem, s.approach(), s.explorer_report, prior, s.round, s.findings, s.lenses, s.evidence, s.design_return, iteration=s.iteration)
         for role, brief in lane_briefs.items():
             jobs[role] = self.delegate(f"debate-{s.round}-{role}", role, brief, ephemeral=False)
         s.phase, s.group = "job", {"join_groups": [], "jobs": {}, "pending": list(jobs)}
@@ -652,7 +660,7 @@ class M:
 
     def request_evidence(self):
         s = self.s
-        if any(e["design_returns"] == s.design_returns and e["round"] == s.round for e in s.evidence): return False
+        if any(e.get("iteration") == s.iteration and e["design_returns"] == s.design_returns and e["round"] == s.round for e in s.evidence): return False
         for lens in self.lanes():
             text = s.reports.get(lens, {}).get("report", "")
             blocks = re.findall(r"^## Evidence request\s*$(.*?)(?=^## |\Z)", text, re.M | re.S)
@@ -665,7 +673,7 @@ class M:
             if deadline <= self.ev.now: return False
             suffix = f"evidence-{s.round}-{lens}"
             ref = self.rid(suffix)
-            s.evidence.append({"design_returns": s.design_returns, "round": s.round, "lens": lens, "request": request, "answer": "", "ref": ref})
+            s.evidence.append({"iteration": s.iteration, "design_returns": s.design_returns, "round": s.round, "lens": lens, "request": request, "answer": "", "ref": ref})
             action = self.delegate(suffix, "explorer", briefs.evidence_explorer(ref, request), ephemeral=True)
             self.emit("post", ref + "-request", thread=s.thread, post_kind="report", text=f"Evidence request from {lens}:\n{request}\nref: {ref}", details=None)
             s.phase, s.group = "evidence", {"join_groups": [], "jobs": {}, "pending": ["explorer"]}
@@ -676,7 +684,7 @@ class M:
 
     def finish_evidence(self, answer: str):
         s = self.s
-        entry = next((e for e in reversed(s.evidence) if e["design_returns"] == s.design_returns and e["round"] == s.round), None)
+        entry = next((e for e in reversed(s.evidence) if e.get("iteration") == s.iteration and e["design_returns"] == s.design_returns and e["round"] == s.round), None)
         if entry is None: return
         entry["answer"] = answer
         self.stop_workers(["explorer"])

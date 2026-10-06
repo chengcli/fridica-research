@@ -281,3 +281,75 @@ def test_large_explorer_report_in_debate_preserves_action_reference():
     for action in w.state.waiting["actions"]:
         assert len(action["brief"]) <= 40_000
         assert contracts.ref_of(action["brief"]) == action["action_id"]
+
+
+def evidence_then_code_audit_return():
+    from support import EXPLORER_REPORT
+    w = World()
+    w.to_debate()
+    request_round(w)
+    w.finish("explorer", result(report="ITERATION_ONE_EVIDENCE"))
+    finish_round(w)
+    w.finish("auditor", result(report=report(verdict="pass")))
+    w.finish("implementer", result())
+    w.finish("auditor", result(report=report(verdict="return")))
+    assert w.state.iteration == 2
+    w.finish("explorer", result(report=EXPLORER_REPORT))
+    w.tick(w.cfg.settle_window)
+    assert w.state.stage == "Debate" and w.state.round == 1
+    return w
+
+
+def test_evidence_request_after_code_audit_return_is_iteration_scoped():
+    w = evidence_then_code_audit_return()
+    request_round(w)
+    assert w.state.phase == "evidence" and len(w.state.evidence) == 2
+    assert [e["iteration"] for e in w.state.evidence] == [1, 2]
+    w.finish("explorer", result(report="ITERATION_TWO_EVIDENCE"))
+    assert [e["answer"] for e in w.state.evidence] == ["ITERATION_ONE_EVIDENCE", "ITERATION_TWO_EVIDENCE"]
+    assert all("ITERATION_TWO_EVIDENCE" in a["brief"] and "ITERATION_ONE_EVIDENCE" not in a["brief"] for a in w.state.waiting["actions"])
+
+
+def test_evidence_answers_do_not_leak_after_code_audit_return():
+    w = evidence_then_code_audit_return()
+    assert all("ITERATION_ONE_EVIDENCE" not in a["brief"] for a in w.state.waiting["actions"])
+
+
+def test_legacy_evidence_restart_preserves_inflight_answer_and_isolation():
+    from fridica_research.machine import State
+    w = World()
+    w.to_debate()
+    request_round(w)
+    snapshot = w.state.to_dict()
+    snapshot["evidence"][0].pop("iteration", None)
+    w.state = State.from_dict(snapshot)
+    assert w.state.evidence[0]["iteration"] == 1
+    w.finish("explorer", result(report="LEGACY_CURRENT_ANSWER"))
+    assert all("LEGACY_CURRENT_ANSWER" in a["brief"] for a in w.state.waiting["actions"])
+    finish_round(w)
+    w.finish("auditor", result(report=report(verdict="pass")))
+    w.finish("implementer", result())
+    w.finish("auditor", result(report=report(verdict="return")))
+    snapshot = w.state.to_dict()
+    snapshot["evidence"][0].pop("iteration")
+    w.state = State.from_dict(snapshot)
+    assert w.state.iteration == 2 and w.state.evidence[0]["iteration"] == 1
+    assert "iteration" not in snapshot["evidence"][0]  # Loading does not mutate the caller's snapshot.
+    from support import EXPLORER_REPORT
+    w.finish("explorer", result(report=EXPLORER_REPORT))
+    w.tick(w.cfg.settle_window)
+    assert all("LEGACY_CURRENT_ANSWER" not in a["brief"] for a in w.state.waiting["actions"])
+    request_round(w)
+    assert w.state.phase == "evidence"
+
+
+def test_legacy_evidence_without_parseable_reference_is_not_attributed():
+    from fridica_research.machine import State
+    w = World()
+    w.to_debate()
+    w.state.evidence = [{"design_returns": 0, "round": 1, "lens": "mathematician", "request": "old", "answer": "UNSCOPED_ANSWER", "ref": "unknown"}]
+    w.state = State.from_dict(w.state.to_dict())
+    request_round(w)
+    assert w.state.phase == "evidence" and len(w.state.evidence) == 2
+    w.finish("explorer", result(report="CURRENT_ANSWER"))
+    assert all("UNSCOPED_ANSWER" not in a["brief"] for a in w.state.waiting["actions"])

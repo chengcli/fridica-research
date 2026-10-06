@@ -127,7 +127,7 @@ class Driver:
         now = self.clock()
         try:
             if a.kind == "delegate":
-                body = {k: v for k, v in a.data.items() if k not in ("thread", "action_id", "lens")}
+                body = {k: v for k, v in a.data.items() if k not in ("thread", "action_id", "lens", "lens_sha256")}
                 r = self.client.delegate(state.thread, body)
                 jobs = r.get("jobs") or []
                 return [Event("delegated", now, {"action_id": a.id, "join_group": r.get("join_group", ""), "jobs": jobs})]

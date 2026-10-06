@@ -29,10 +29,11 @@ from typing import Callable
 
 from .config import Config
 from .machine import State
+from .roles import roles_table, holders
 
 log = logging.getLogger("fridica_research.board")
 Runner = Callable[[list[str], str | None], str]  # (argv, stdin) -> stdout
-STAGE_OPTIONS = ("Explore", "Claim", "Debate", "Implement", "Audit", "Deliver", "Delivered", "Stopped")
+STAGE_OPTIONS = ("Explore", "Claim", "Debate", "DesignAudit", "Implement", "Audit", "Deliver", "Delivered", "Stopped")
 ROLE_OPTIONS = ("explorer", "debater", "implementer", "auditor", "driver", "peer-reviewer")
 STATUS = {"todo": "Todo", "in_progress": "In Progress", "done": "Done"}  # the built-in Status field's default options
 OPTIONS = {"Stage": STAGE_OPTIONS, "Role": ROLE_OPTIONS}
@@ -43,11 +44,12 @@ FIELDS = {
 }
 BOARD_STAGE = {"Blocked": "Stopped"}
 
-_FIELD_NODES = "fields(first:100){nodes{... on ProjectV2Field{id name dataType} ... on ProjectV2SingleSelectField{id name dataType options{id name}} ... on ProjectV2IterationField{id name dataType}}}"
+_FIELD_NODES = "fields(first:100){nodes{... on ProjectV2Field{id name dataType} ... on ProjectV2SingleSelectField{id name dataType options{id name color description}} ... on ProjectV2IterationField{id name dataType}}}"
 Q_DISCOVER = {kind: "query($owner:String!,$number:Int!){%s(login:$owner){projectV2(number:$number){id %s}}}" % (kind, _FIELD_NODES) for kind in ("user", "organization")}
 Q_ITEMS = {kind: "query($owner:String!,$number:Int!,$after:String){%s(login:$owner){projectV2(number:$number){items(first:100,after:$after){pageInfo{hasNextPage endCursor} nodes{id content{... on Issue{number repository{name}}}}}}}}" % kind for kind in ("user", "organization")}
 Q_ISSUE = "query($owner:String!,$name:String!,$number:Int!){repository(owner:$owner,name:$name){issue(number:$number){id}}}"
 Q_VERIFY = "query($owner:String!,$name:String!,$number:Int!){repository(owner:$owner,name:$name){issue(number:$number){projectItems(first:20){nodes{project{number} started:fieldValueByName(name:\"Started\"){... on ProjectV2ItemFieldDateValue{date}} projected_finish:fieldValueByName(name:\"Projected finish\"){... on ProjectV2ItemFieldDateValue{date}} finished:fieldValueByName(name:\"Finished\"){... on ProjectV2ItemFieldDateValue{date}} projected_hours:fieldValueByName(name:\"Projected hours\"){... on ProjectV2ItemFieldNumberValue{number}} actual_hours:fieldValueByName(name:\"Actual hours\"){... on ProjectV2ItemFieldNumberValue{number}} stage:fieldValueByName(name:\"Stage\"){... on ProjectV2ItemFieldSingleSelectValue{name}}}}}}}"
+M_UPDATE_FIELD = "mutation($field:ID!,$options:[ProjectV2SingleSelectFieldOptionInput!]!){updateProjectV2Field(input:{fieldId:$field,singleSelectOptions:$options}){projectV2Field{... on ProjectV2SingleSelectField{id}}}}"
 M_ADD_ITEM = "mutation($project:ID!,$content:ID!){addProjectV2ItemById(input:{projectId:$project,contentId:$content}){item{id}}}"
 _SET = "mutation($project:ID!,$item:ID!,$field:ID!,$%s:%s){updateProjectV2ItemFieldValue(input:{projectId:$project,itemId:$item,fieldId:$field,value:{%s:$%s}}){projectV2Item{id}}}"
 M_SET_DATE = _SET % ("date", "Date!", "date", "date")
@@ -106,7 +108,7 @@ class Projects:
         cached = None if refresh else self.recall(key)
         if cached: return ProjectIds.from_json(cached)
         p = self.graphql(Q_DISCOVER[self.owner_kind()], owner=owner, number=number)[self.owner_kind()]["projectV2"]
-        ids = ProjectIds(p["id"], {f["name"]: {"id": f["id"], "dataType": f["dataType"], "options": {o["name"]: o["id"] for o in f.get("options", [])}} for f in p["fields"]["nodes"] if f})
+        ids = ProjectIds(p["id"], {f["name"]: {"id": f["id"], "dataType": f["dataType"], "options": {o["name"]: o["id"] for o in f.get("options", [])}, "option_details": [{"id": o["id"], "name": o["name"], "color": o.get("color", "GRAY"), "description": o.get("description", "")} for o in f.get("options", [])]} for f in p["fields"]["nodes"] if f})
         self.remember(key, ids.to_json())
         return ids
 
@@ -122,6 +124,15 @@ class Projects:
             if FIELDS[name] == "SINGLE_SELECT": argv += ["--single-select-options", ",".join(OPTIONS[name])]
             self.run(argv, None)
         if missing: self._project = self.discover(self.b.owner, self.b.number, refresh=True)
+        stage = self.project().fields.get("Stage")
+        if stage and "DesignAudit" not in stage["options"]:
+            # Refresh an old cached field before preserving option colours and descriptions.
+            self._project = self.discover(self.b.owner, self.b.number, refresh=True)
+            stage = self.project().fields["Stage"]
+            if "DesignAudit" not in stage["options"]:
+                options = stage["option_details"] + [{"name": "DesignAudit", "color": "PURPLE", "description": "Consensus design audit before implementation"}]
+                self.graphql(M_UPDATE_FIELD, field=stage["id"], options=options)
+                self._project = self.discover(self.b.owner, self.b.number, refresh=True)
 
     def field(self, name: str) -> dict:
         f = self.project().fields.get(name)
@@ -198,7 +209,9 @@ def stage_table(state: State) -> str:
 
 def _hm(ts): return dt.datetime.fromtimestamp(ts, dt.timezone.utc).strftime("%Y-%m-%d %H:%M") if ts else ""
 def _dur(s): return f"{int(s // 3600)}:{int(s % 3600 // 60):02d}" if s is not None else ""
-def _workers(state: State) -> str: return ", ".join(f"{r}={w['worker_id']}" for r, w in sorted(state.workers.items()))
+def _workers(state: State, cfg: Config | None = None) -> str:
+    text = ", ".join(f"{r}={w['worker_id']}" for r, w in sorted(state.workers.items()))
+    return (roles_table(holders(state, cfg)) + "\n" + text) if cfg else text
 
 
 def role_totals(state: State) -> dict[str, dict[str, float]]:
@@ -282,7 +295,9 @@ class Board:
 
     def sync_study(self, state: State, cards: dict):
         owner_login = self.login(self.cfg.owner, state)
-        body = stage_table(state)
+        body = stage_table(state) + "\n\n" + roles_table(holders(state, self.cfg))
+        misses = {k: v for k, v in state.mention_misses.items() if v >= 2}
+        if misses: body += "\n\nRepeated handoff mention misses: " + json.dumps(misses, sort_keys=True)
         if "issue" not in cards:
             given = self.issue_numbers.get(state.thread) or self.issue_numbers.get(state.channel)
             cards["issue"], cards["given"], cards["filled"] = (int(given) if given else self.api.create_issue(self.title(state), body, owner_login)), bool(given), False
@@ -295,7 +310,7 @@ class Board:
         self.api.edit_issue(n, "--body", body)
         self.api.set_option(n, "Stage", BOARD_STAGE.get(state.stage, state.stage))
         self.api.set_number(n, "Iteration", state.iteration)
-        for field, value in (("Approach", (state.claim or {}).get("slug")), ("Workers", _workers(state)), ("Result", state.notes[-1] if state.stage in ("Stopped", "Blocked") and state.notes else state.deliverable.get("summary", "")[:500]), ("Follow-on", state.followon), ("Peer reviewers", ", ".join(filter(None, (self.login(r.handle, state) for r in self.cfg.reviewers))))):
+        for field, value in (("Approach", (state.claim or {}).get("slug")), ("Workers", _workers(state, self.cfg)), ("Result", state.notes[-1] if state.stage in ("Stopped", "Blocked") and state.notes else state.deliverable.get("summary", "")[:500]), ("Follow-on", state.followon), ("Peer reviewers", ", ".join(filter(None, (self.login(r.handle, state) for r in self.cfg.reviewers))))):
             if value: self.api.set_text(n, field, value)
 
     def audit_cards(self, state: State, row: dict, cards: dict, out: list):
@@ -330,7 +345,7 @@ class Board:
                     if sc["signed_at"] is None: continue  # closes on the assignee's SIGN-OFF line, not before
                     self.close(card["issue"], day(sc["signed_at"]), (sc["signed_at"] - row["start"]) / 3600)
                 elif row["end"] is not None:
-                    if _workers(state) and not card["scope"]: self.api.set_text(card["issue"], "Workers", _workers(state))
+                    if _workers(state) and not card["scope"]: self.api.set_text(card["issue"], "Workers", _workers(state, self.cfg))
                     self.close(card["issue"], day(row["end"]), row["actual"] / 3600)
                 else: continue
                 card["closed"] = True

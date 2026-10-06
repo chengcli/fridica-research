@@ -1,12 +1,12 @@
 # fridica-research
 
 Research role policy is packaged in `src/fridica_research/roles/`. Run
-`fridica-research roles` to list the roles and the debater's lenses. Each delegation
-carries the selected role text in its `instructions` field.
+`fridica-research roles` to list the roles and the debater's lenses. Each delegation carries the selected role and study lens text inside its brief; the host body
+contains only supported delegation fields. The driver and arbitrator is policy, never delegated.
 
 The auto-research stage machine and driver for [fridica](https://github.com/chengcli/fridica)
 (chengcli/fridica#126). A study is a root post in a research channel; the driver runs
-explorer -> claim -> (mathematician || physicist) debate -> implementer -> auditor -> delivery,
+explorer -> claim -> debate (2–3 study lenses, optional evidence) -> design auditor -> implementer -> code auditor -> delivery,
 iterates on returned findings, posts every stage change in the thread, mirrors the study onto a
 GitHub project, and starts the follow-on study when the owner lets it. Several fridicas split
 approaches by a claim-by-post protocol with no leader.
@@ -30,6 +30,7 @@ channels = ["C0123456789"]          # research channels; a root post here starts
 starters = []                       # Slack user ids allowed to start studies (empty: the owner)
 max_iterations = 3
 max_debate_rounds = 2
+max_lenses = 3                       # host default limit: four workers
 auditor_backend = "other"
 auto_followon = true
 max_generations = 5
@@ -45,6 +46,8 @@ owner = "U0123456"                  # the owner's Slack user id (own posts are s
 explore = "10m"
 claim = "2m"
 debate = "20m"
+design_audit = "20m"
+evidence = "15m"
 implement = "90m"
 audit = "90m"
 deliver = "10m"

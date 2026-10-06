@@ -112,6 +112,7 @@ class World:
             self.finish("mathematician", result(report=report(position=pm)))
             self.finish("physicist", result(report=report(position=pp)))
             if self.state.stage != "Debate" or self.state.phase != "job": break
+        if self.state.stage == "DesignAudit": self.finish("auditor", result(report=report(verdict="pass")))
         return self.state
 
     def to_audit(self, pr=PR):

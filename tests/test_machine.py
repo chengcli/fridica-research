@@ -25,7 +25,7 @@ def test_explore_results_parse_approaches_and_post_claim():
     w = World()
     w.to_claim()
     assert [a["slug"] for a in w.state.approaches] == ["alpha", "beta", "gamma"]
-    post = w.kinds("post")[0]
+    post = [p for p in w.kinds("post") if p["post_kind"] == "study_claim"][0]
     assert post["post_kind"] == "study_claim"
     assert "Claim (iteration 1): Alpha design" in post["text"] and "approach: alpha" in post["text"] and f"ref: {post.id}" in post["text"]
     assert w.state.stage == "Claim" and w.state.claim["status"] == "settling"  # own echo auto-fed by World
@@ -35,7 +35,7 @@ def test_claim_pending_until_own_post_seen():
     w = World(auto_post=False)
     w.to_claim()
     assert w.state.claim["status"] == "pending" and w.state.claim["ts"] is None
-    post = w.kinds("post")[0]
+    post = [p for p in w.kinds("post") if p["post_kind"] == "study_claim"][0]
     w.ev("own_post_seen", ts="1700000000.000500", kind="study_claim", text=post["text"])
     assert w.state.claim == {"status": "settling", "slug": "alpha", "ts": "1700000000.000500"}
     assert w.state.waiting["kind"] == "timer"
@@ -49,9 +49,9 @@ def test_claim_settles_into_debate_with_persistent_pair():
     assert roles == ["explorer", "debater", "debater"]
     assert all(a["ephemeral"] is False for a in w.kinds("delegate")[1:])
     for a in w.kinds("delegate")[1:]:
-        assert "# Debater" in a["instructions"]
-        assert f"# {a['lens'].title()}" in a["instructions"]
-        assert "needs contract decision" in a["instructions"]
+        assert "# Debater" in a["brief"]
+        assert f"# {a['lens'].title()}" in a["brief"]
+        assert "needs contract decision" in a["brief"]
 
 
 def test_auditor_brief_contains_lower_layer_charter():
@@ -59,7 +59,7 @@ def test_auditor_brief_contains_lower_layer_charter():
     w.to_audit()
     audit = [a for a in w.kinds("delegate") if a["role"] == "auditor"][0]
     assert "fridica-core: general mechanism only" in audit["brief"]
-    assert "### Layer boundaries" in audit["instructions"]
+    assert "### Layer boundaries" in audit["brief"]
 
 
 def test_claim_lost_to_earlier_peer_repicks():
@@ -99,7 +99,7 @@ def test_debate_rounds_until_agree_or_max():
     assert "previous round" in d[-1]["brief"]
     w.finish("mathematician", result(report=report(position="disagree")))
     w.finish("physicist", result(report=report(position="disagree")))
-    assert w.state.stage == "Implement"  # r >= max -> synthesis -> implement
+    assert w.state.stage == "DesignAudit"  # r >= max -> synthesis -> design audit
     assert w.kinds("llm_call")[-1]["name"] == "study_synthesis"
     assert sorted(a["worker_id"] for a in w.kinds("stop_worker")) == sorted(w.workers[r] for r in ("mathematician", "physicist"))
 
@@ -121,8 +121,8 @@ def test_missing_stance_is_disagree():
 def test_max_debate_rounds_zero_skips_debate():
     w = World(cfg=dataclasses.replace(CFG, max_debate_rounds=0))
     w.to_debate()
-    assert w.state.stage == "Implement" and w.state.round == 0
-    assert [a["role"] for a in w.kinds("delegate")] == ["explorer", "implementer"]
+    assert w.state.stage == "DesignAudit" and w.state.round == 0
+    assert [a["role"] for a in w.kinds("delegate")] == ["explorer", "auditor"]
     assert not w.kinds("stop_worker")
     assert "no debate rounds" in w.kinds("llm_call")[1]["prompt"]
 
@@ -167,8 +167,9 @@ def test_audit_return_next_iteration_resumes_implementer():
     w.tick(60)
     w.finish("mathematician", result(report=report(position="agree")))
     w.finish("physicist", result(report=report(position="agree")))
+    if w.state.stage == "DesignAudit": w.finish("auditor", result(report=report(verdict="pass")))
     impls = [a for a in w.kinds("delegate") if a["role"] == "implementer"]
-    assert len(impls) == 2 and impls[1].get("worker_id") == w.workers["implementer"] and "supersedes" in impls[1]["brief"]
+    assert len(impls) == 2 and impls[1].get("worker_id") == w.workers["implementer"] and "Audited consensus" in impls[1]["brief"]
 
 
 def test_audit_return_at_max_iterations_delivers_partial():
@@ -280,6 +281,7 @@ def test_no_followon_when_not_spawner_or_at_max_generation():
     w.tick(60)
     w.finish("mathematician", result(report=report(position="agree")))
     w.finish("physicist", result(report=report(position="agree")))
+    if w.state.stage == "DesignAudit": w.finish("auditor", result(report=report(verdict="pass")))
     w.finish("implementer")
     w.finish("auditor", result(report=report(verdict="pass")))
     assert w.state.stage == "Delivered" and [p["post_kind"] for p in w.kinds("post")][-1] == "study_result"
@@ -302,7 +304,7 @@ def test_llm_calls_per_iteration_and_delegate_bound():
     assert len(w.kinds("delegate")) <= 2 + 2 * CFG.max_debate_rounds + 2
 
 
-@pytest.mark.parametrize("stage", ["Explore", "Claim", "Debate", "Implement", "Audit", "Deliver"])
+@pytest.mark.parametrize("stage", ["Explore", "Claim", "Debate", "DesignAudit", "Implement", "Audit", "Deliver"])
 def test_each_stage_logs_one_row(stage):
     w = World()
     w.to_delivered()
@@ -327,8 +329,9 @@ def test_finding_event_is_recorded_not_injected():
     w.ev("finding", text="R99: also support Y")
     assert w.state.findings == ["iteration 1 note during Implement: R99: also support Y"] and len(w.actions) == n
     assert w.kinds("delegate")[-1]["brief"] == brief_before
+    if w.state.stage == "DesignAudit": w.finish("auditor", result(report=report(verdict="pass")))
     w.finish("implementer")
-    assert "R99: also support Y" in w.kinds("delegate")[-1]["brief"]  # the auditor checks against it
+    assert "R99: also support Y" not in w.kinds("delegate")[-1]["brief"]  # scope is the audited consensus only
     w.finish("auditor", result(report=report(verdict="return")))
     assert "R99" in w.kinds("llm_call")[-1]["prompt"]  # and the next iteration's brief carries it
 
@@ -359,7 +362,7 @@ def test_audit_scopes_without_local_auditor_and_peer_changes():
     cfg = dataclasses.replace(CFG, audit_scopes=("scope",), require_signoffs=True)
     w = World(cfg=cfg)
     w.to_audit()
-    assert [a["role"] for a in w.kinds("delegate")] == ["explorer", "debater", "debater", "debater", "debater", "implementer"]
+    assert [a["role"] for a in w.kinds("delegate")] == ["explorer", "debater", "debater", "debater", "debater", "auditor", "implementer"]
     assert w.state.phase == "signoff" and w.state.audit_scopes == {"scope": {"reviewer": "UREV", "verdict": None, "signed_at": None, "requested": True}}
     w.ev("sign_off", sender="USOMEONE", pr=PR, sha=SHA, verdict="approve")  # not a reviewer: recorded, no effect
     assert w.state.stage == "Audit"
@@ -402,7 +405,7 @@ def test_refused_audit_request_is_recorded_and_retried():
     req = [p for p in w.kinds("post") if p["post_kind"] == "report"]
     w.ev("post_refused", action_id=req[-1].id, post_kind="report", code="rate_limited", outcome="rejected")
     assert w.state.stage == "Audit" and w.state.attempt == 2 and all(sc["requested"] for sc in w.state.audit_scopes.values())
-    assert len([p for p in w.kinds("post") if p["post_kind"] == "report"]) == 2 and "audit request refused" in w.state.notes[-1]
+    assert len([p for p in w.kinds("post") if p.id.endswith("audit-request")]) == 2 and "audit request refused" in w.state.notes[-1]
     w.ev("post_refused", post_kind="report", code="rate_limited", outcome="rejected")  # second refusal: Blocked, never a pass
     assert w.state.stage == "Blocked" and not any(sc["requested"] for sc in w.state.audit_scopes.values())
     w.tick(cfg.stage_timeout)
@@ -429,6 +432,7 @@ def test_won_slug_is_not_treated_as_taken_later():
     w.tick(CFG.settle_window)
     w.finish("mathematician", result(report=report(position="agree")))
     w.finish("physicist", result(report=report(position="agree")))
+    if w.state.stage == "DesignAudit": w.finish("auditor", result(report=report(verdict="pass")))
     w.finish("implementer")
     w.finish("auditor", result(report=report(verdict="return")))
     assert w.state.iteration == 2 and w.state.stage == "Explore"
@@ -441,7 +445,7 @@ def test_peer_claim_recorded_while_pending_is_dropped_when_our_echo_is_earlier()
     w.to_claim()
     w.ev("peer_post", ts="1700000000.000900", sender=PEER, kind="study_claim", text="Claim (iteration 1): x\napproach: alpha\nwhy: w\nalso considered: none")
     assert "alpha" in w.state.peer_claims  # our ts is unknown yet
-    w.ev("own_post_seen", ts="1700000000.000500", kind="study_claim", text=w.kinds("post")[0]["text"])
+    w.ev("own_post_seen", ts="1700000000.000500", kind="study_claim", text=[p for p in w.kinds("post") if p["post_kind"] == "study_claim"][0]["text"])
     assert w.state.claim["status"] == "settling" and "alpha" not in w.state.peer_claims and w.state.excluded == []
 
 
@@ -474,9 +478,10 @@ def test_audit_completes_at_once_when_all_scopes_are_peers_and_signoffs_optional
     cfg = dataclasses.replace(CFG, audit_scopes=("scope",), require_signoffs=False)
     w = World(cfg=cfg)
     w.to_audit()
-    assert "auditor" not in [a["role"] for a in w.kinds("delegate")]
+    assert not [a for a in w.kinds("delegate") if a["role"] == "auditor" and "/Audit/" in a.id]
     assert w.state.stage == "Delivered" and w.state.audit["verdict"] == "pass" and w.state.audit_scopes["scope"]["signed_at"] is None
-    assert [r["stage"] for r in w.state.stage_log] == ["Explore", "Claim", "Debate", "Implement", "Audit", "Deliver"]
+    assert not w.state.mention_misses  # late Audit handoff echoes validate against their named stage
+    assert [r["stage"] for r in w.state.stage_log] == ["Explore", "Claim", "Debate", "DesignAudit", "Implement", "Audit", "Deliver"]
 
 
 def test_round4_2_a_later_changes_from_the_auditor_reopens_an_approved_scope():

@@ -49,13 +49,13 @@ def test_restart_equivalence_next_delegate_is_byte_identical(world):
     drv = driver(cfg)
     to_mid_debate2(server, cfg, drv, thread)
     jobs_before = len(server.view(thread)["jobs"])
-    # Uninterrupted driver: finish round 2 with agreement -> synthesis -> implementer delegate.
+    # Uninterrupted driver: finish round 2 with agreement -> synthesis -> design auditor delegate.
     snapshot = drv.store.load(thread).to_dict()
     for role in ("mathematician", "physicist"): server.finish_job(thread, server.job_of(thread, role)["id"], result(report=report(position="agree")))
     cursor_at_results = len(server.events)
     drain(drv)
     uninterrupted = [r for r in server.requests if r[1].endswith("/delegate")][-1]
-    assert uninterrupted[2]["role"] == "implementer"
+    assert uninterrupted[2]["role"] == "auditor"  # design audit now precedes implementation
     # Kill it: roll the world back to the snapshot and replay through a fresh driver with a fresh store.
     server.view(thread)["jobs"] = server.view(thread)["jobs"][:jobs_before]
     for j in server.view(thread)["jobs"][-2:]: j["job_status"], j["result"] = "finished", result(report=report(position="agree"))
@@ -74,7 +74,7 @@ def test_restart_equivalence_next_delegate_is_byte_identical(world):
 def test_claim_ordering_peer_before_echo_we_win():
     w = World(auto_post=False)
     w.to_claim()
-    post = w.kinds("post")[0]
+    post = [p for p in w.kinds("post") if p["post_kind"] == "study_claim"][0]
     w.ev("peer_post", ts="1700000000.000900", sender=PEER, kind="study_claim", text=CLAIM_ALPHA)  # T1
     assert w.state.claim["status"] == "pending" and not w.kinds("delegate")[1:]
     w.ev("own_post_seen", ts="1700000000.000800", kind="study_claim", text=post["text"])  # T0 < T1
@@ -86,7 +86,7 @@ def test_claim_ordering_peer_before_echo_we_win():
 def test_claim_ordering_peer_earlier_we_repick_and_delegate_nothing_in_between():
     w = World(auto_post=False)
     w.to_claim()
-    post = w.kinds("post")[0]
+    post = [p for p in w.kinds("post") if p["post_kind"] == "study_claim"][0]
     w.ev("peer_post", ts="1700000000.000700", sender=PEER, kind="study_claim", text=CLAIM_ALPHA)  # T1
     w.ev("own_post_seen", ts="1700000000.000800", kind="study_claim", text=post["text"])  # T0 > T1: lost
     claims = [p for p in w.kinds("post") if p["post_kind"] == "study_claim"]
@@ -100,7 +100,7 @@ def test_claim_ordering_peer_earlier_we_repick_and_delegate_nothing_in_between()
 def test_claim_ordering_echo_then_peer_earlier_during_settle():
     w = World(auto_post=False)
     w.to_claim()
-    w.ev("own_post_seen", ts="1700000000.000800", kind="study_claim", text=w.kinds("post")[0]["text"])
+    w.ev("own_post_seen", ts="1700000000.000800", kind="study_claim", text=[p for p in w.kinds("post") if p["post_kind"] == "study_claim"][0]["text"])
     w.ev("peer_post", ts="1700000000.000700", sender=PEER, kind="study_claim", text=CLAIM_ALPHA)
     assert w.state.excluded == ["alpha"] and w.state.claim["slug"] == "beta"
 

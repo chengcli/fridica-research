@@ -18,6 +18,8 @@ from dataclasses import dataclass, field
 
 POST_KINDS = ("study_claim", "study_result", "study_root", "report")
 BODY_LIMIT = 64 * 1024  # control request body cap (fridica src/control/mod.rs)
+# fridica fefd4c3fe214f2a9d8bcd114e5238c3518696714 src/control/api.rs:786 (strict host allowlist).
+DELEGATE_FIELDS = frozenset(("role", "brief", "context", "worker_id", "ephemeral", "backend", "deliverable", "tags", "actor"))
 BRIEF_LIMIT = 40_000  # fridica-core delegation::prepare
 POST_LIMIT = 40_000  # Slack message text cap
 STUDY_ROOT_ROUTE = "/channels/{channel}/post"  # pinned: a study_root with no thread yet
@@ -41,12 +43,10 @@ class DelegateRequest:
     backend: str = "same"  # same | other | <name>
     deliverable: str = "report"
     tags: tuple[str, ...] = ()
-    instructions: str = ""  # research role prose; host includes it in the worker instruction fingerprint
 
     def body(self) -> dict:
         b = {"role": self.role, "brief": self.brief, "context": self.context, "ephemeral": self.ephemeral, "backend": self.backend, "deliverable": self.deliverable, "tags": list(self.tags)}
         if self.worker_id: b["worker_id"] = self.worker_id
-        if self.instructions: b["instructions"] = self.instructions
         return b
 
 

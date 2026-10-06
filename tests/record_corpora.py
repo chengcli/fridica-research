@@ -30,6 +30,7 @@ def finish_study(w: World, positions=(("agree", "agree"),)):
         w.finish("mathematician", result(report=report(position=pm)))
         w.finish("physicist", result(report=report(position=pp)))
         if w.state.stage != "Debate" or w.state.phase != "job": break
+    if w.state.stage == "DesignAudit": w.finish("auditor", result(report=report(verdict="pass")))
     w.finish("implementer", result(artifacts=[PR]))
     if "auditor" in w.pending: w.finish("auditor", result(report=report(verdict="pass")))
 
@@ -71,6 +72,7 @@ def worker_failure():
     w.finish("mathematician", result(), job_status="failed", code="backend_crash")
     w.finish("mathematician", result(report=report(position="agree")))
     w.finish("physicist", result(report=report(position="agree")))
+    if w.state.stage == "DesignAudit": w.finish("auditor", result(report=report(verdict="pass")))
     w.finish("implementer", result(artifacts=[PR]))
     w.finish("auditor", result(report=report(verdict="pass")))
     return w
@@ -95,6 +97,7 @@ def peer_claim_conflict():
     w.tick(w.cfg.settle_window)
     w.finish("mathematician", result(report=report(position="agree")))
     w.finish("physicist", result(report=report(position="agree")))
+    if w.state.stage == "DesignAudit": w.finish("auditor", result(report=report(verdict="pass")))
     w.finish("implementer", result(artifacts=[PR]))
     w.finish("auditor", result(report=report(verdict="pass")))
     return w
@@ -144,10 +147,24 @@ def refused_reviewer_retry():
     return w
 
 
+def debate_adds_lens():
+    w = World()
+    w.to_debate()
+    proposal = "## Lenses\n### mathematician\n# Mathematician\nCheck invariants.\n### physicist\n# Physicist\nCheck balances.\n### engineer\n# Engineer\nCheck failure paths.\n"
+    w.finish("mathematician", result(report=report(position="revised", body=proposal)))
+    w.finish("physicist", result(report=report(position="revised")))
+    for lane in ("engineer", "mathematician", "physicist"):
+        w.finish(lane, result(report=report(position="agree")))
+    w.finish("auditor", result(report=report(verdict="pass")))
+    w.finish("implementer", result(artifacts=[PR]))
+    w.finish("auditor", result(report=report(verdict="pass")))
+    return w
+
+
 SCENARIOS = {
     "000_bootstrap": bootstrap, "001_simple_research": simple_research, "002_debate_disagreement": debate_disagreement, "003_auditor_return": auditor_return,
     "004_worker_failure": worker_failure, "005_timeout_retry": timeout_retry, "006_peer_claim_conflict": peer_claim_conflict, "007_partial_delivery": partial_delivery,
-    "008_changes_then_timeout": changes_then_timeout, "009_refused_reviewer": refused_reviewer, "010_refused_reviewer_retry": refused_reviewer_retry,
+    "008_changes_then_timeout": changes_then_timeout, "009_refused_reviewer": refused_reviewer, "010_refused_reviewer_retry": refused_reviewer_retry, "011_debate_adds_lens": debate_adds_lens,
 }
 
 

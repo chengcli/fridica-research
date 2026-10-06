@@ -33,6 +33,7 @@ import logging
 import re
 from dataclasses import dataclass, field
 
+from .roles import roles_table
 from . import contracts
 from .board import M_ADD_ITEM, Projects, Runner, subprocess_runner
 from .config import Config
@@ -181,7 +182,9 @@ class GitHub:
 
     def next_pr_body(self, repo: str, summary: str, closes: int | None, thread: str, generation: int) -> str:
         """The R23 body for the next PR to `repo`, with the post-merge items carried from earlier reviews (R24)."""
-        return contracts.pr_body(summary, closes, thread, self.board_url(), f"R{generation}", self.carried(repo))
+        owner = self.cfg.login_of(self.cfg.owner) or self.cfg.owner or "unassigned"
+        names = {"explorer": owner, "debater": owner, "implementer": owner, "auditor": ", ".join([r.login or self.cfg.login_of(r.handle) for r in self.cfg.reviewers]) or "unassigned", "driver and arbitrator": owner}
+        return contracts.pr_body(summary + "\n\n" + roles_table(names), closes, thread, self.board_url(), f"R{generation}", self.carried(repo))
 
     def existing_pr(self, repo: str, head: str) -> str:
         prs = json.loads(self.run(["gh", "pr", "list", "-R", repo, "--head", head, "--state", "open", "--json", "url"], None) or "[]")
@@ -194,6 +197,9 @@ class GitHub:
         attempt is found again (`gh pr list --head`), so a retry after a failed step completes the rest without a second PR."""
         missing = contracts.pr_hygiene_missing(body)
         if missing: raise PrHygieneError("refusing to open a PR without " + ", ".join(missing))
+        if "| Role | Holder | Responsibility |" not in body:
+            owner = self.cfg.login_of(self.cfg.owner) or self.cfg.owner or "unassigned"
+            body += "\n\n" + roles_table({**{r: owner for r in ("explorer", "debater", "implementer", "driver and arbitrator")}, "auditor": ", ".join([r.login or self.cfg.login_of(r.handle) for r in self.cfg.reviewers]) or "unassigned"})
         key = f"github:open:{repo.lower()}:{head}"
         p = json.loads(self.recall(key) or "{}")
         save = lambda: self.remember(key, json.dumps(p, sort_keys=True))  # noqa: E731

@@ -34,25 +34,50 @@ requirements of the bootstrap run (R1-R14, 2026-10-04, iterations 1 and 2; R19, 
 debate (chengcli/fridica#126); the requirements are stated here as behaviour, not as instructions
 to a human. Source of truth for each rule is the code named beside it.
 
-## The loop
+## Roles
 
-```
-root post in a research channel
-  -> Explore   (LLM study_brief -> explorer worker, ephemeral)
-  -> Claim     (post claim; Pending -> Settling(W) -> Owned, or Lost -> re-pick)
-  -> Debate    (mathematician || physicist, rounds; then LLM study_synthesis)
-  -> Implement (implementer, persistent, resumed across iterations)
-  -> Audit     (auditor worker on the other backend + peer sign-offs in the thread)
-  -> Deliver   (LLM study_deliver -> study_result post -> study_root for the follow-on)
-  -> Delivered
-```
+| Role | Holder | Responsibility |
+|---|---|---|
+| explorer | assigned per study | Search literature and ecosystem prior art; findings for debate |
+| debater | assigned per study | Debate through lenses, request evidence, produce consensus |
+| auditor | assigned per study | Design audit before implementation; code audit against audited consensus |
+| implementer | assigned per study | Implement the audited consensus only; retain revisions |
+| driver and arbitrator | assigned per study | Holds no PR role; runs threads, assignments and rotation, hand-offs, board, ETAs, replay gate and merge on auditor approval under maintainer authority; arbitrates disagreements and unclear rules; escalates owner-only questions to the study owner |
 
-`machine.step(state, event, config) -> (state, actions)` is pure; the driver persists the state
-after every step (`store.py`, one SQLite transaction) and executes the actions (`driver.py`).
-Blocked (owner-resumable) and Stopped are the two ways out of the loop. Every outcome of
-executing an action comes back as an event (`delegated`, `delegate_refused`, `llm_result`,
-`post_refused`), so the snapshot in the store is always the fold of `step` over the events
-(`tests/test_rebuild.py`).
+## The pipeline
+
+Explore -> Claim -> Debate (sorted lens lanes, evidence) -> consensus -> DesignAudit ->
+Implement (audited consensus only) -> Audit (code diff vs audited consensus) -> Deliver.
+DesignAudit sees only the consensus and layer charters, never the explorer report.
+Pass enables Implement; reject stops; return goes to Debate with the auditor's findings,
+`design_returns += 1` and fresh rounds up to `max_debate_rounds`. The counter is per study,
+not per iteration. At three returns a fourth design-audit entry Blocks and escalates to
+study owner chengcli. Owner resume authorizes one extra entry without resetting the counter;
+a subsequent return is bounded again. Design-audit overrun Blocks; resume re-enters that stage.
+Return cancels the old design-audit timers and starts a new Debate row and overrun timer.
+
+Every hand-off is a thread post mentioning the next holder, identifying its input (post/ref
+or full PR head), and giving its due time. Missing mentions produce one reminder per
+(stage, author), with the driver supplying the next-holder mention; repeated misses (2+)
+are recorded on the board. Local worker roles belong to the driver's owner; code-audit peer
+holders come from the configured reviewers.
+
+Lanes are 2 to `max_lenses` sorted study lens slugs. Packaged lenses are defaults; only a
+PR edits them. `## Lenses` specifies the complete next-round overlay (2..max_lenses entries,
+`### <slug>` plus text, at most 4,000 characters). Invalid proposals become findings.
+Overlay text wins, including for lenses absent from the package. Removed lanes are stopped
+before the next round. `max_lenses` defaults to 3 and load rejects values outside 2..3;
+this assumes the host's default four-worker limit: three lanes plus the implementer.
+
+At most one evidence job is issued per (design_returns, round). It receives only the lens's
+request; the answer is posted to the thread and enters the next debate brief. Its deadline
+is the earlier of request time + evidence projection (15m default) and Debate row start +
+debate projection. If no time remains, no job starts and debate continues. Evidence lives in
+research-side snapshot state, never host ask state. A Debate overrun while waiting for
+an answer stops unfinished jobs and synthesizes with retained reports; that synthesis has
+five minutes, then moves to the next iteration with the overrun finding if unfinished.
+Other debate overruns preserve partial summaries as findings and advance the iteration.
+
 
 ## R1. Stage posts in the study thread
 
@@ -121,20 +146,16 @@ hours and Finished on delivery.
 
 ## R5. Roles and the loop
 
-Roles are this package's `roles/` catalog (explorer, debater with mathematician and physicist
-lenses, implementer, auditor). Every delegation sends the complete role text as `instructions`;
-the two debate lanes retain their lens names as research-side worker identifiers while the
-host receives the `debater` role. The host must
-include `instructions` in its instruction fingerprint when resuming a worker (fridica #130).
-Debate = mathematician || physicist, each report ending with a `## Stance` block
-(`position: agree|disagree|revised`, `notes:`); a missing position counts as `disagree`. Rounds
-count delegations: `round >= max_debate_rounds` is checked before delegating, so
-`max_debate_rounds = 0` goes straight to the synthesis call with no reports. The pair converges
-when both agree or the maximum is reached; the same two worker ids are resumed in every round and
-every iteration (so the persistent worker count stays at 3 of 4), and stopped at synthesis. The
-stance is parsed from the report block, or from an `annotations.stance` object once core #3
-provides that generic field (`contracts.parse_stance` is the single seam). The research
-convention for a missing or invalid position is `disagree`.
+Roles are this package's catalog. Complete role and study-overlay lens text travel inside
+briefs, never in an `instructions` body field. Local `lens_sha256` fingerprints lens text
+for structural replay (D2) and is stripped before contacting the host. `roles/driver.md`
+is CLI-listed policy, not a worker role; it can never be delegated. Every PR root body,
+study issue and Workers field renders the same five-row roles table with holders; the
+study card has Role = driver.
+
+Debate converges when all active lenses agree or `max_debate_rounds` is reached. Persistent
+workers are the implementer plus sorted active lens lanes; dropped lanes are stopped.
+A missing or invalid stance counts as disagree. With zero rounds, synthesis starts directly.
 
 ## R6. Audit by peers
 
@@ -178,7 +199,7 @@ the audit request asks `@user please reply with your GitHub login` and a bare `@
 
 Every card carries a `Role` single-select (explorer, debater, implementer, auditor, driver,
 peer-reviewer), set at creation: the study card and the Claim and Deliver cards are `driver`,
-Explore `explorer`, Debate `debater`, Implement `implementer`, a local audit card `auditor`,
+Explore `explorer`, Debate `debater`, Implement `implementer`, DesignAudit and a local code-audit card `auditor`,
 a peer's audit card `peer-reviewer`. `fridica-research list --board` prints projected and
 actual hours per role for each study (`board.role_totals`, from the stage log and the audit
 scopes; a peer reviewer's actual time is the latency from audit start to their sign-off).
@@ -186,12 +207,12 @@ scopes; a peer reviewer's actual time is the latency from audit start to their s
 Requirement or design changes that arrive while a stage runs are never injected into the
 running worker. `fridica-research note <thread> "<text>"` queues a `finding` event; the machine
 appends it to the current iteration's findings (`iteration N note during <Stage>: ...`), the
-auditor's brief checks the implementation against the findings, and unmet ones travel into the
+auditor's brief checks the diff against the audited consensus; returned findings travel into the
 next iteration's explorer brief and debate briefs. Each role's brief is bounded to its stage
 output (explorer: findings and `## Approaches`; debaters: analysis and `## Stance`; implementer:
-the synthesis only; auditor: verdict and findings).
+the audited consensus only; auditor: verdict and findings).
 
-A job stage (Explore, Debate, Implement, Audit) that runs past **2x its projected duration** is
+A job stage (Explore, Debate, DesignAudit, Implement, Audit) that runs past **2x its projected duration** is
 interrupted: one `overrun` timer per stage run (kept across retry attempts), armed at
 `stage start + 2 x [projection]`; when it fires the stage's workers are stopped, the finished
 parts (job summaries, debate reports) become a finding
@@ -383,3 +404,17 @@ jobs applied), a missing one is re-POSTed byte-identically; a waiting post that 
 snapshot as absolute deadlines. Polling resumes from the stored cursor
 (`GET /events?after=<cursor>&limit=1000`, end of page when `scanned < limit`, idle sleep 2 s);
 a fresh store starts at the ledger's end.
+
+## Issue 38 scope boundaries
+
+Role and lens policy is embedded in the brief, not an unsupported host instructions field.
+Brief sections are Role, Study, inputs, Task, Output format, Findings, Reference. Findings
+shrink oldest first, then the longest input; Role, Task, Output, consensus and Reference are
+never cut. The final reference is rendered after shrinking. Oversized mandatory text fails
+the stage. Implementer input excludes Study, Approach, explorer text and other findings;
+auditor input excludes explorer text and implementer summaries.
+
+SIGN-OFF grammar changes are issue #33; R21 polling stays. Its existing host view prior art
+is [fridica view.rs, lines 95–145](https://github.com/chengcli/fridica/blob/fefd4c3fe214f2a9d8bcd114e5238c3518696714/src/github/view.rs#L95-L145);
+this reference is guidance, not a runtime dependency. Host instructions support belongs to
+fridica #138; projection budget replacement belongs to #39. Issue 38 changes neither.

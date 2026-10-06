@@ -2,7 +2,7 @@
 
 No I/O, no clock (every event carries `now`). The driver persists the returned state as the
 study's snapshot after every step, so the snapshot equals the fold of `step` over the events.
-Stages: Explore -> Claim -> Debate (rounds, then the synthesis LLM call) -> Implement -> Audit
+Stages: Explore -> Claim -> Debate (rounds, evidence, consensus) -> DesignAudit -> Implement -> Audit
 -> Deliver -> Delivered; Blocked (owner-resumable) and Stopped are terminal for the loop.
 Design decisions (debate synthesis, chengcli/fridica#126):
 - one `waiting` item at a time, identified by a deterministic ActionId carried as a `ref:` line;
@@ -13,24 +13,27 @@ Design decisions (debate synthesis, chengcli/fridica#126):
   notifies the owner; WorkerResult.status failed/needs_input and audit `return` are not failures
   but go to the next iteration (or a partial delivery at max_iterations);
 - post refusals are post problems (re-post, redact on egress), never stage failures;
-- the same mathematician/physicist/implementer worker ids are resumed across rounds and
+- the same active lens/implementer worker ids are resumed across rounds and
   iterations; explorer and auditor are ephemeral.
 """
 from __future__ import annotations
 
 import copy
+import hashlib
+import re
+import datetime as dt
 from dataclasses import asdict, dataclass, field
 
 from . import briefs, contracts
-from .roles import instructions as role_instructions
+from .roles import default_lenses
 from .config import Config
 
-ORDER = ("Explore", "Claim", "Debate", "Implement", "Audit", "Deliver", "Delivered")
+ORDER = ("Explore", "Claim", "Debate", "DesignAudit", "Implement", "Audit", "Deliver", "Delivered")
 TERMINAL = ("Delivered", "Stopped")
-JOB_STAGES = ("Explore", "Debate", "Implement", "Audit")  # stages with a worker; the 2x-projected overrun rule applies
-STAGE_ROLE = {"Explore": "explorer", "Claim": "driver", "Debate": "debater", "Implement": "implementer", "Audit": "auditor", "Deliver": "driver"}
+JOB_STAGES = ("Explore", "Debate", "DesignAudit", "Implement", "Audit")  # stages with a worker; the 2x-projected overrun rule applies
+STAGE_ROLE = {"Explore": "explorer", "Claim": "driver", "Debate": "debater", "DesignAudit": "auditor", "Implement": "implementer", "Audit": "auditor", "Deliver": "driver"}
 OVERRUN_FACTOR = 2.0
-PERSISTENT = ("mathematician", "physicist", "implementer")
+PROJECTION_KEY = {stage: ("design_audit" if stage == "DesignAudit" else stage.lower()) for stage in ORDER}
 SLOT_CODES = ("too_many_workers", "worker_limit", "too many persistent workers")
 MAX_POST_TRIES = 3  # posts of the same text before a rate-limit/failure refusal becomes a stage failure (rule R)
 REOPEN = ("changes", "dismissed")  # scope verdicts that keep the audit from passing: a changes request, or a withdrawn approval
@@ -67,9 +70,21 @@ class State:
     spawner: bool = True  # only the origin root's owner posts follow-ons
     iteration: int = 1
     stage: str = "Explore"
-    phase: str = "idle"  # idle | llm | job | post | settle | slot | signoff
+    phase: str = "idle"  # idle | llm | job | evidence | post | settle | slot | signoff
     attempt: int = 1
     round: int = 0
+    design_returns: int = 0  # per study; never reset by next_iteration
+    design_resume: bool = False  # explicit owner resume authorizes one otherwise-blocked entry
+    lenses: dict = field(default_factory=default_lenses)
+    pending_lenses: dict | None = None
+    evidence: list = field(default_factory=list)
+    consensus: str = ""
+    audited_consensus: str = ""
+    design_return: str = ""
+    synthesis_overrun: bool = False
+    overrun_note: str = ""
+    mention_misses: dict = field(default_factory=dict)  # stage/author -> count
+    mention_reminded: list = field(default_factory=list)
     blocked_from: str | None = None
     control: str = "active"
     waiting: dict | None = None
@@ -124,6 +139,11 @@ class M:
         s = self.s
         return f"{s.thread}/g{s.generation}/i{s.iteration}/{stage or s.stage}/a{s.attempt}/{suffix}"
 
+    def rid(self, suffix: str) -> str:
+        return self.aid(f"r{self.s.design_returns}/{suffix}" if self.s.design_returns else suffix)
+
+    def lanes(self): return sorted(self.s.lenses)
+
     def emit(self, kind: str, id_: str, **data): self.out.append(Action(kind, id_, data))
 
     def arm(self, suffix: str, seconds: float):
@@ -148,8 +168,8 @@ class M:
         self.s.notes.append(text)
         self.emit("notify_owner", self.aid(f"notify-{len(self.s.notes)}"), text=text)
 
-    def stop_workers(self, roles=PERSISTENT):
-        for role in roles:
+    def stop_workers(self, roles=None):
+        for role in (roles if roles is not None else ["implementer", *self.lanes()]):
             w = self.s.workers.get(role)
             if w and w.get("live"):
                 w["live"] = False
@@ -170,16 +190,27 @@ class M:
         elif stage == "Delivered":
             self.s.finished_at = self.ev.now
         self.board()
+        if stage in ORDER[:-1]: self.handoff(stage)
+
+    def handoff(self, stage: str):
+        s = self.s
+        peers = [r.handle for r in self.cfg.reviewers] if stage == "Audit" else []
+        targets = peers or [self.cfg.owner]
+        mentions = " ".join(f"<@{holder}>" for holder in targets if holder) or "(holder unconfigured)"
+        reference = (s.audited_consensus or s.consensus).rsplit("Consensus reference: ", 1)[-1] if stage in ("DesignAudit", "Implement") else s.implementer.get("sha") or s.thread
+        due = dt.datetime.fromtimestamp(self.ev.now + self.cfg.projection[PROJECTION_KEY[stage]], dt.timezone.utc).isoformat()
+        text = f"{contracts.stage_line(stage, s.iteration)}\n{mentions} handoff to {STAGE_ROLE[stage]}; input: {reference}\ndue: {due}\nref: {self.rid('handoff')}"
+        self.emit("post", self.rid("handoff"), thread=s.thread, post_kind="report", text=text, details=None)
 
     def row(self, stage: str) -> dict:
-        return {"stage": stage, "role": STAGE_ROLE[stage], "iteration": self.s.iteration, "start": self.ev.now, "projected": self.cfg.projection[stage.lower()], "end": None, "actual": None}
+        return {"stage": stage, "role": STAGE_ROLE[stage], "iteration": self.s.iteration, "start": self.ev.now, "projected": self.cfg.projection[PROJECTION_KEY[stage]], "end": None, "actual": None}
 
     def arm_overrun(self):
         """R12: a job stage is interrupted at 2x its projected duration; one timer per stage run, kept across attempts."""
         s = self.s
         tid = f"{s.thread}/g{s.generation}/i{s.iteration}/{s.stage}/overrun"
         if s.stage in JOB_STAGES and tid not in s.timers:
-            s.timers[tid] = s.stage_log[-1]["start"] + OVERRUN_FACTOR * self.cfg.projection[s.stage.lower()]
+            s.timers[tid] = s.stage_log[-1]["start"] + OVERRUN_FACTOR * self.cfg.projection[PROJECTION_KEY[s.stage]]
             self.emit("arm_timer", tid, deadline=s.timers[tid])
 
     def mirror_scopes(self):
@@ -216,7 +247,10 @@ class M:
         s = self.s
         if stage != s.stage: self.set_stage(stage)
         self.arm_overrun()
-        {"Explore": self.enter_explore, "Claim": self.pick, "Debate": self.enter_debate, "Implement": self.enter_implement, "Audit": self.enter_audit, "Deliver": self.enter_deliver}[stage]()
+        try:
+            {"Explore": self.enter_explore, "Claim": self.pick, "Debate": self.enter_debate, "DesignAudit": self.enter_design_audit, "Implement": self.enter_implement, "Audit": self.enter_audit, "Deliver": self.enter_deliver}[stage]()
+        except ValueError as error:
+            self.retry(f"brief failed: {error}")
 
     def enter_explore(self):
         s = self.s
@@ -227,12 +261,14 @@ class M:
     def delegate(self, suffix: str, role: str, brief: str, ephemeral: bool, backend: str = "same") -> dict:
         s = self.s
         w = s.workers.get(role)
-        catalog_role = "debater" if role in ("mathematician", "physicist") else role
+        catalog_role = "debater" if role in s.lenses else role
         lens = role if catalog_role == "debater" else None
-        req = contracts.DelegateRequest(catalog_role, brief, "fresh", w["worker_id"] if w else None, ephemeral, backend, "report", (self.aid(suffix),), role_instructions(catalog_role, lens))
-        action = {"action_id": self.aid(suffix), "thread": s.thread, **req.body()}
-        if lens: action["lens"] = lens  # local correlation only; the host receives the debater role and role prose
-        self.emit("delegate", self.aid(suffix), **action)
+        req = contracts.DelegateRequest(catalog_role, brief, "fresh", w["worker_id"] if w else None, ephemeral, backend, "report", (self.rid(suffix),))
+        action = {"action_id": self.rid(suffix), "thread": s.thread, **req.body()}
+        if lens:
+            action["lens_sha256"] = hashlib.sha256(s.lenses[lens].encode()).hexdigest()
+            action["lens"] = lens  # local correlation only; the host receives the debater role and role prose
+        self.emit("delegate", self.rid(suffix), **action)
         return action
 
     def pick(self):
@@ -268,31 +304,46 @@ class M:
         if s.round >= self.cfg.max_debate_rounds:
             self.enter_synthesis()
             return
+        if s.pending_lenses is not None:
+            self.stop_workers([role for role in s.lenses if role not in s.pending_lenses])
+            s.lenses, s.pending_lenses = s.pending_lenses, None
         s.round += 1
         prior = {r: v.get("report", "") for r, v in s.reports.items()}
-        jobs = {}
-        for role, other in (("mathematician", "physicist"), ("physicist", "mathematician")):
-            brief = briefs.debate(self.aid(f"debate-{s.round}-{role}"), role, other, s.problem, s.approach(), s.explorer_report, prior, s.round, s.findings)
+        jobs, lane_briefs = {}, {}
+        for role in self.lanes():
+            lane_briefs[role] = briefs.debate(self.rid(f"debate-{s.round}-{role}"), role, [r for r in self.lanes() if r != role], s.problem, s.approach(), s.explorer_report, prior, s.round, s.findings, s.lenses, s.evidence, s.design_return)
+        for role, brief in lane_briefs.items():
             jobs[role] = self.delegate(f"debate-{s.round}-{role}", role, brief, ephemeral=False)
         s.phase, s.group = "job", {"join_groups": [], "jobs": {}, "pending": list(jobs)}
-        s.waiting = {"kind": "group", "id": self.aid(f"debate-{s.round}"), "actions": list(jobs.values())}
+        s.waiting = {"kind": "group", "id": self.rid(f"debate-{s.round}"), "actions": list(jobs.values())}
         self.cancel("timer")
         self.arm("timer", self.cfg.stage_timeout)
 
     def enter_synthesis(self):
         s = self.s
-        s.phase, s.waiting = "llm", {"kind": "llm", "id": self.aid("synth")}
+        s.phase, s.waiting = "llm", {"kind": "llm", "id": self.rid("synth")}
         self.emit("llm_call", s.waiting["id"], name="study_synthesis", prompt=briefs.prompt_synthesis(s.problem, s.approach(), s.explorer_report, s.reports))
         self.cancel("timer")
+        self.arm("timer", 300 if s.synthesis_overrun else self.cfg.stage_timeout)
+
+    def enter_design_audit(self):
+        s = self.s
+        if s.design_returns >= 3 and not s.design_resume:
+            self.halt("Blocked", "Three design returns completed; before a fourth design audit escalate to study owner chengcli. Owner resume authorizes one additional entry without resetting design_returns.")
+            return
+        s.design_resume = False
+        ref = self.rid("design-audit")
+        action = self.delegate("design-audit", "auditor", briefs.design_auditor(ref, s.consensus), ephemeral=True, backend=self.cfg.auditor_backend)
+        s.phase, s.group = "job", {"join_groups": [], "jobs": {}, "pending": ["auditor"]}
+        s.waiting = {"kind": "group", "id": ref, "actions": [action]}
         self.arm("timer", self.cfg.stage_timeout)
 
     def enter_implement(self):
         s = self.s
-        superseded = "implementer" in s.workers
-        brief = briefs.implementer(self.aid("impl"), s.problem, s.approach(), s.synthesis.get("synthesis", ""), s.synthesis.get("decisions", []), s.synthesis.get("open_questions", []), s.findings, superseded)
+        brief = briefs.implementer(self.rid("impl"), s.audited_consensus)
         action = self.delegate("impl", "implementer", brief, ephemeral=False)
         s.phase, s.group = "job", {"join_groups": [], "jobs": {}, "pending": ["implementer"]}
-        s.waiting = {"kind": "group", "id": self.aid("impl"), "actions": [action]}
+        s.waiting = {"kind": "group", "id": self.rid("impl"), "actions": [action]}
         self.arm("timer", self.cfg.stage_timeout)
 
     def enter_audit(self):
@@ -316,10 +367,10 @@ class M:
             s.phase, s.waiting, s.group = "signoff", None, None
             if not self.cfg.require_signoffs: self.check_signoffs()  # nothing to wait for: no local auditor and sign-offs optional
             return
-        brief = briefs.auditor(self.aid("audit"), s.problem, s.synthesis.get("synthesis", ""), impl.get("summary", ""), impl.get("machine_state"), s.findings, local)
+        brief = briefs.auditor(self.rid("audit"), s.audited_consensus, impl, local)
         action = self.delegate("audit", "auditor", brief, ephemeral=True, backend=self.cfg.auditor_backend)
         s.phase, s.group = "job", {"join_groups": [], "jobs": {}, "pending": ["auditor"]}
-        s.waiting = {"kind": "group", "id": self.aid("audit"), "actions": [action]}
+        s.waiting = {"kind": "group", "id": self.rid("audit"), "actions": [action]}
 
     def enter_deliver(self):
         s = self.s
@@ -333,6 +384,8 @@ class M:
         self.cancel_all()
         if s.iteration < self.cfg.max_iterations:
             s.iteration, s.round, s.claim, s.approaches, s.reports, s.synthesis = s.iteration + 1, 0, None, [], {}, {}
+            s.consensus, s.audited_consensus, s.design_return = "", "", ""
+            s.synthesis_overrun = False
             self.enter("Explore")
         else:
             s.partial = True
@@ -358,6 +411,7 @@ class M:
             if s.stage == "Blocked" and s.control == "active":
                 s.stage, s.blocked_from = s.blocked_from or "Explore", None
                 s.attempt = 1
+                if s.stage == "DesignAudit" and s.design_returns >= 3: s.design_resume = True
                 s.stage_log.append(self.row(s.stage))
                 self.board()
                 self.enter(s.stage)
@@ -412,7 +466,9 @@ class M:
                     s.group["jobs"][j["job_id"]] = {"role": lane, "action_id": ev["action_id"], "worker_id": j["worker_id"], "result": None}
                     s.workers[lane] = {"worker_id": j["worker_id"], "live": True}
                     if lane in s.group["pending"]: s.group["pending"].remove(lane)
-                if not s.group["pending"]: s.waiting["kind"], s.phase = "group", "job"
+                if not s.group["pending"]:
+                    s.waiting["kind"] = "group"
+                    s.phase = "evidence" if s.waiting.get("evidence") else "job"
             return
         if k == "delegate_refused":
             if not self.awaits(ev["action_id"]): return
@@ -452,7 +508,10 @@ class M:
             self.repost()
         elif suffix == "timer":
             if s.stage == "Audit" and s.phase == "signoff": self.deliver_without_signoffs()
+            elif s.stage == "Debate" and s.phase == "llm" and s.synthesis_overrun: self.next_iteration(s.overrun_note)
             else: self.retry("timeout")
+        elif suffix == "evidence":
+            self.finish_evidence("Evidence deadline expired; no answer available.")
         elif suffix == "overrun":
             self.overrun()
 
@@ -486,22 +545,34 @@ class M:
         partial = "; ".join(done + [f"{r}: {v.get('summary', '')}" for r, v in s.reports.items() if f"{r}:" not in " ".join(done)]) or "none"
         self.stop_workers(roles=[j["role"] for j in (s.group or {"jobs": {}})["jobs"].values()])
         elapsed = (self.ev.now - s.stage_log[-1]["start"]) / 60
-        self.next_iteration(f"iteration {s.iteration} {s.stage} interrupted after {elapsed:.0f} min (2x the projected {self.cfg.projection[s.stage.lower()] / 60:.0f} min); partial result: {partial}")
+        note = f"iteration {s.iteration} {s.stage} interrupted after {elapsed:.0f} min (2x the projected {self.cfg.projection[PROJECTION_KEY[s.stage]] / 60:.0f} min); partial result: {partial}"
+        if s.stage == "DesignAudit":
+            self.halt("Blocked", note + "; owner resume re-enters DesignAudit")
+        elif s.stage == "Debate" and s.waiting and s.waiting.get("evidence"):
+            self.cancel_all()
+            s.findings.append(note)
+            s.group = None
+            s.synthesis_overrun, s.overrun_note = True, note
+            self.enter_synthesis()
+        else: self.next_iteration(note)
 
     def llm(self, payload: dict):
         s = self.s
         s.waiting = None
         if s.stage == "Explore":
             s.brief = payload
-            brief = briefs.explorer(self.aid("explorer"), s.problem, payload.get("brief", ""), payload.get("questions", []), s.findings, s.peer_claims)
+            brief = briefs.explorer(self.rid("explorer"), s.problem, payload.get("brief", ""), payload.get("questions", []), s.findings, s.peer_claims)
             action = self.delegate("explorer", "explorer", brief, ephemeral=True)
             s.phase, s.group = "job", {"join_groups": [], "jobs": {}, "pending": ["explorer"]}
-            s.waiting = {"kind": "group", "id": self.aid("explorer"), "actions": [action]}
+            s.waiting = {"kind": "group", "id": self.rid("explorer"), "actions": [action]}
         elif s.stage == "Debate":
+            ref = self.rid("synth")
             s.synthesis = payload
+            s.consensus = briefs.consensus(payload, ref)
+            s.synthesis_overrun = False
             self.cancel_all()
-            self.stop_workers(("mathematician", "physicist"))
-            self.enter("Implement")
+            self.stop_workers(self.lanes())
+            self.enter("DesignAudit")
         elif s.stage == "Deliver":
             s.deliverable = payload
             self.post_result()
@@ -535,7 +606,7 @@ class M:
             self.retry(f"{job['role']} job {jr.job_status}: {jr.code}")
             return
         job["result"] = jr.result or {}
-        {"Explore": self.explore_done, "Debate": self.debate_done, "Implement": self.implement_done, "Audit": self.audit_done}.get(s.stage, lambda j: None)(job)
+        {"Explore": self.explore_done, "Debate": self.debate_done, "Implement": self.implement_done, "DesignAudit": self.design_audit_done, "Audit": self.audit_done}.get(s.stage, lambda j: None)(job)
 
     def explore_done(self, job):
         s = self.s
@@ -551,12 +622,85 @@ class M:
 
     def debate_done(self, job):
         s = self.s
+        if job["role"] == "explorer" and s.phase == "evidence":
+            self.finish_evidence(job["result"].get("report", ""))
+            return
         st = contracts.parse_stance(job["result"])
         s.reports[job["role"]] = {"report": job["result"].get("report", ""), "summary": job["result"].get("summary", ""), "stance": st.position or contracts.DEFAULT_POSITION}
         if any(j["result"] is None for j in s.group["jobs"].values()) or s.group["pending"]: return
         self.cancel("timer")
-        if all(s.reports.get(r, {}).get("stance") == "agree" for r in ("mathematician", "physicist")): self.enter_synthesis()
+        self.apply_lens_proposals()
+        if self.request_evidence(): return
+        if s.pending_lenses is None and all(s.reports.get(r, {}).get("stance") == "agree" for r in self.lanes()): self.enter_synthesis()
         else: self.enter_debate()
+
+    def apply_lens_proposals(self):
+        s = self.s
+        for lens in self.lanes():
+            text = s.reports.get(lens, {}).get("report", "")
+            m = re.search(r"^## Lenses\s*$(.*?)(?=^## |\Z)", text, re.M | re.S)
+            if not m: continue
+            block = m.group(1)
+            pieces = re.split(r"^### (.*?)\s*$", block, flags=re.M)
+            names = [x.strip() for x in pieces[1::2]]
+            texts = [x.strip() for x in pieces[2::2]]
+            if len(block) > 4000 or not 2 <= len(names) <= self.cfg.max_lenses or len(set(names)) != len(names) or any(not contracts.SLUG.fullmatch(n) or n in ("explorer", "debater", "implementer", "auditor", "driver") for n in names) or not all(texts) or pieces[0].strip():
+                s.findings.append(f"Invalid Lenses block from {lens}; expected 2..{self.cfg.max_lenses} distinct slugs with text, at most 4,000 chars")
+                continue
+            s.pending_lenses = dict(zip(names, texts))
+            break
+
+    def request_evidence(self):
+        s = self.s
+        if any(e["design_returns"] == s.design_returns and e["round"] == s.round for e in s.evidence): return False
+        for lens in self.lanes():
+            text = s.reports.get(lens, {}).get("report", "")
+            blocks = re.findall(r"^## Evidence request\s*$(.*?)(?=^## |\Z)", text, re.M | re.S)
+            if not blocks: continue
+            request = blocks[0].strip()
+            if len(blocks) != 1 or not any(contracts.lines(request).get(k) for k in ("question", "source", "experiment")):
+                s.findings.append(f"Invalid Evidence request from {lens}")
+                continue
+            deadline = min(self.ev.now + self.cfg.projection["evidence"], s.stage_log[-1]["start"] + self.cfg.projection["debate"])
+            if deadline <= self.ev.now: return False
+            suffix = f"evidence-{s.round}-{lens}"
+            ref = self.rid(suffix)
+            s.evidence.append({"design_returns": s.design_returns, "round": s.round, "lens": lens, "request": request, "answer": "", "ref": ref})
+            action = self.delegate(suffix, "explorer", briefs.evidence_explorer(ref, request), ephemeral=True)
+            self.emit("post", ref + "-request", thread=s.thread, post_kind="report", text=f"Evidence request from {lens}:\n{request}\nref: {ref}", details=None)
+            s.phase, s.group = "evidence", {"join_groups": [], "jobs": {}, "pending": ["explorer"]}
+            s.waiting = {"kind": "group", "id": ref, "actions": [action], "evidence": True}
+            self.arm("evidence", deadline - self.ev.now)
+            return True
+        return False
+
+    def finish_evidence(self, answer: str):
+        s = self.s
+        entry = next((e for e in reversed(s.evidence) if e["design_returns"] == s.design_returns and e["round"] == s.round), None)
+        if entry is None: return
+        entry["answer"] = answer
+        self.stop_workers(["explorer"])
+        s.workers.pop("explorer", None)
+        self.cancel("evidence")
+        self.emit("post", entry["ref"] + "-answer", thread=s.thread, post_kind="report", text=f"Evidence answer:\n{answer}\nref: {entry['ref']}", details=None)
+        self.enter_debate()
+
+    def design_audit_done(self, job):
+        s = self.s
+        s.workers.pop("auditor", None)
+        r = job["result"]
+        verdict = contracts.parse_stance(r).verdict or contracts.DEFAULT_VERDICT
+        self.cancel_all()
+        if verdict == "pass":
+            s.audited_consensus = s.consensus
+            self.enter("Implement")
+        elif verdict == "reject": self.halt("Stopped", f"Design auditor rejected consensus: {r.get('summary', '')}")
+        else:
+            s.design_returns += 1
+            s.design_return = r.get("report", "") + "\n" + r.get("summary", "")
+            s.round, s.reports, s.synthesis = 0, {}, {}
+            s.consensus, s.audited_consensus = "", ""
+            self.enter("Debate")
 
     def implement_done(self, job):
         s = self.s
@@ -598,6 +742,7 @@ class M:
 
     # -- posts ---------------------------------------------------------------
     def own_post(self, ev: Event):
+        if ev.get("kind") == "report": self.check_handoff(ev)
         s = self.s
         w = s.waiting
         if not (w and w["kind"] == "post" and ev.get("kind") == w["action"]["post_kind"] and contracts.ref_of(ev.get("text", "")) == w["id"]): return
@@ -645,8 +790,29 @@ class M:
         s.timers[self.aid("repost")] = self.ev.now + float(ev.get("retry_after") or 30)
         self.emit("arm_timer", self.aid("repost"), deadline=s.timers[self.aid("repost")])
 
+    def check_handoff(self, ev):
+        s = self.s
+        if "handoff" not in ev.get("text", "").lower(): return
+        header = re.search(r"^Stage: (\w+)", ev.get("text", ""), re.M)
+        stage = header.group(1) if header and header.group(1) in STAGE_ROLE else s.stage
+        targets = [r.handle for r in self.cfg.reviewers] if stage == "Audit" and self.cfg.reviewers else [self.cfg.owner]
+        if all(f"<@{target}>" in ev.get("text", "") for target in targets): return
+        author = ev.get("sender") or self.cfg.owner
+        key = f"{stage}/{author}"
+        s.mention_misses[key] = s.mention_misses.get(key, 0) + 1
+        if key not in s.mention_reminded:
+            s.mention_reminded.append(key)
+            due = dt.datetime.fromtimestamp(self.ev.now + self.cfg.projection.get(PROJECTION_KEY.get(stage, ""), 0), dt.timezone.utc).isoformat()
+            mentions = " ".join(f"<@{target}>" for target in targets)
+            text = f"Handoff author {author}: include the next holder mention. {mentions} receives input post {ev.get('ts')}; due: {due}\nref: {self.rid(f'mention-reminder-{len(s.mention_reminded)}')}"
+            self.emit("post", self.rid(f"mention-reminder-{len(s.mention_reminded)}"), thread=s.thread, post_kind="report", text=text, details=None)
+        self.board()
+
     def peer_post(self):
         s, ev = self.s, self.ev
+        if ev.get("kind") == "report":
+            self.check_handoff(ev)
+            return
         if ev.get("kind") != "study_claim": return
         c = contracts.parse_claim(ev.get("text", ""))
         if not c: return
@@ -702,5 +868,6 @@ def start(thread: str, channel: str, problem: str, now: float, *, generation: in
 
 def step(state: State, event: Event, cfg: Config) -> tuple[State, list[Action]]:
     m = M(state, event, cfg)
-    m.run()
+    try: m.run()
+    except ValueError as error: m.retry(f"brief failed: {error}")
     return m.s, m.out

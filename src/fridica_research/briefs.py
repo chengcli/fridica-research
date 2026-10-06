@@ -11,6 +11,7 @@ import json
 from importlib import resources
 
 from . import contracts
+from .roles import instructions
 
 ROLES = {"explore": "explorer", "debate": "debater", "implement": "implementer", "audit": "auditor"}
 CHARTERS = (
@@ -26,64 +27,78 @@ def schema(name: str) -> dict:
 
 
 def fit(sections: list[tuple[str, str]], findings: list[str], limit: int = contracts.BRIEF_LIMIT) -> str:
-    """Compose `## heading` sections plus a findings section; shrink to `limit` characters."""
-    def render(fs: list[str]) -> str:
+    """Findings shrink oldest first, then longest input; mandatory sections and final ref survive."""
+    protected = {"Role", "Task", "Output", "Output format", "Reference", "Consensus", "Audited consensus"}
+    sections = list(sections)
+    refs = [(h, b) for h, b in sections if h == "Reference"]
+    sections = [(h, b) for h, b in sections if h != "Reference"]
+    fs = list(findings)
+    def render():
         parts = [f"## {h}\n{b.strip()}" for h, b in sections if b and b.strip()]
         if fs: parts.append("## Findings from earlier iterations\n" + "\n".join(f"- {f}" for f in fs))
+        parts.extend(f"## {h}\n{b.strip()}" for h, b in refs)
         return "\n\n".join(parts) + "\n"
-    fs = list(findings)
-    text = render(fs)
+    text = render()
     while len(text) > limit and fs:
         fs.pop(0)
-        text = render(fs)
-    if len(text) > limit:
-        cut = "\n\n[truncated to fit the brief cap]\n"
-        text = text[: limit - len(cut)] + cut
+        text = render()
+    while len(text) > limit:
+        candidates = [(len(b), i) for i, (h, b) in enumerate(sections) if h not in protected and b]
+        if not candidates: raise ValueError("mandatory brief sections exceed the 40,000-character cap")
+        _, i = max(candidates)
+        h, body = sections[i]
+        sections[i] = (h, body[:max(0, len(body) - (len(text) - limit))])
+        text = render()
     return text
 
 
 def explorer(ref: str, problem: str, brief: str, questions: list[str], findings: list[str], peer_claims: dict[str, str]) -> str:
     peers = "\n".join(f"- {s}: claimed by a peer; do not propose it under another name" for s in sorted(peer_claims)) or "none"
     return fit([
-        ("Study", problem), ("Brief", brief), ("Questions", "\n".join(f"- {q}" for q in questions)),
+        ("Role", instructions("explorer")), ("Study", problem), ("Brief", brief), ("Questions", "\n".join(f"- {q}" for q in questions)),
         ("Approaches already claimed by peers", peers),
-        ("Output format", "End the report with a `## Approaches` section: one line per viable approach, `- <slug>: <title> -- <why>`, slug `^[a-z0-9][a-z0-9-]{0,47}$`, most promising first."),
+        ("Task", "Search literature and ecosystem prior art; propose sourced findings for debate, then viable approaches."),
+        ("Output format", "Include `## Findings for debate`, one line per finding: `- F<n>: <claim> -- source: <URL|DOI|repo@sha:path:line> -- test: <check>`. End the report with a `## Approaches` section: one line per viable approach, `- <slug>: <title> -- <why>`, slug `^[a-z0-9][a-z0-9-]{0,47}$`, most promising first."),
         ("Reference", f"ref: {ref}"),
     ], findings)
 
 
-def debate(ref: str, role: str, other: str, problem: str, approach: contracts.Approach, explorer_report: str, prior: dict[str, str], round_: int, findings: list[str]) -> str:
-    sections = [("Study", problem), ("Approach under study", f"{approach.slug}: {approach.title}\n{approach.why}"), ("Explorer report", explorer_report)]
+def debate(ref: str, role: str, others: list[str], problem: str, approach: contracts.Approach, explorer_report: str, prior: dict[str, str], round_: int, findings: list[str], lenses: dict[str, str] | None = None, evidence: list[dict] = (), design_return: str = "") -> str:
+    sections = [("Role", instructions("debater", role, lenses)), ("Study", problem), ("Approach under study", f"{approach.slug}: {approach.title}\n{approach.why}"), ("Explorer report", explorer_report)]
+    if design_return: sections.append(("Design audit return", design_return))
+    for entry in evidence:
+        if entry.get("answer"): sections.append((f"Evidence answer (return {entry['design_returns']}, round {entry['round']}, {entry['lens']})", entry["answer"]))
     if round_ > 1:
-        sections.append((f"Round {round_}: the {other}'s report from the previous round", prior.get(other, "(none)")))
+        for other in others: sections.append((f"Round {round_}: the {other}'s report from the previous round", prior.get(other, "(none)")))
         sections.append(("Your previous report", prior.get(role, "(none)")))
-        sections.append(("Task", f"Rebut or revise. Address the {other}'s points directly; keep what survives."))
+        task = f"Rebut or revise. Address the other lenses ({', '.join(others)}) directly; keep what survives."
     else:
-        sections.append(("Task", f"Analyse the approach from the {role}'s side. The {other} works in parallel; you will see each other's reports next round."))
-    sections.append(("Output format", "End the report with a `## Stance` block:\nposition: agree|disagree|revised\nnotes: one line per point that decides your position"))
-    sections.append(("Reference", f"ref: {ref}"))
+        task = f"Analyse the approach from the {role}'s side. The other lenses ({', '.join(others)}) work in parallel; you will see their reports next round."
+    sections.extend([("Task", task), ("Output format", "Optionally include ## Lenses with ### <slug> and text per lens (2 to max_lenses, default 3; at most 4,000 chars), and at most one ## Evidence request with question:, source:, experiment:. End with ## Stance:\nposition: agree|disagree|revised\nnotes: one line per deciding point"), ("Reference", f"ref: {ref}")])
     return fit(sections, findings)
 
 
-def implementer(ref: str, problem: str, approach: contracts.Approach, synthesis: str, decisions: list[str], open_questions: list[str], findings: list[str], superseded: bool) -> str:
-    sections = [("Study", problem), ("Approach", f"{approach.slug}: {approach.title}"), ("Synthesis", synthesis), ("Decisions", "\n".join(f"- {d}" for d in decisions)), ("Open questions", "\n".join(f"- {q}" for q in open_questions))]
-    if superseded: sections.append(("Note", "This brief supersedes the earlier iteration's brief; the findings below say what the auditor returned."))
-    sections.append(("Output", "Report the implementation summary, validation performed, known limitations and `machine_state` (branch, commit). Status `partial` is acceptable."))
-    sections.append(("Reference", f"ref: {ref}"))
-    return fit(sections, findings)
+def consensus(payload: dict, ref: str) -> str:
+    return "\n".join(["## Consensus", payload.get("synthesis", ""), "\n### Decisions", *[f"- {d}" for d in payload.get("decisions", [])], "\n### Open questions", *[f"- {q}" for q in payload.get("open_questions", [])], f"\nConsensus reference: {ref}"])
 
 
-def auditor(ref: str, problem: str, synthesis: str, implementer_summary: str, machine_state: dict | None, findings: list[str], scopes: tuple[str, ...] = ()) -> str:
-    ms = json.dumps(machine_state or {}, sort_keys=True)
+def implementer(ref: str, audited_consensus: str) -> str:
+    return fit([("Role", instructions("implementer")), ("Audited consensus", audited_consensus), ("Task", "Implement exactly the audited consensus. Other thread material is a finding, not implementation input."), ("Output format", "Report validation, limitations and machine_state (branch, full commit, base). Include the PR URL in artifacts."), ("Reference", f"ref: {ref}")], [])
+
+
+def design_auditor(ref: str, consensus_text: str) -> str:
+    return fit([("Role", instructions("auditor")), ("Consensus", consensus_text), ("Layer charters", "\n".join(CHARTERS)), ("Task", "Design audit: reuse before build, layer boundaries and design violations. Audit only this consensus, before implementation."), ("Output format", "End with ## Stance:\nverdict: pass|return|reject\nnotes: deciding findings"), ("Reference", f"ref: {ref}")], [])
+
+
+def evidence_explorer(ref: str, request: str) -> str:
+    return fit([("Role", instructions("explorer")), ("Evidence request", request), ("Task", "Answer only the specific evidence request. Supply sources and experiment results in the thread; no new study exploration."), ("Output format", "Report the answer and sources, distinguishing executed checks from hypotheses."), ("Reference", f"ref: {ref}")], [])
+
+
+def auditor(ref: str, audited_consensus: str, impl: dict, scopes: tuple[str, ...] = ()) -> str:
+    ms = impl.get("machine_state") or {}
     scope = ", ".join(scopes) or "scope"
-    return fit([
-        ("Study", problem), ("Synthesis the implementer followed", synthesis), ("Implementer summary", implementer_summary),
-        ("Checkout", f"machine_state: {ms}\nIf the checkout is not reachable from your workspace, audit the text and say so."),
-        ("Layer charters", "\n".join(CHARTERS)),
-        ("Task", f"Audit scope(s): {scope}. Peers audit the other scopes; do not duplicate them. Does the delivered work solve the study within scope, and does it meet the findings noted below? Report findings as the role prescribes."),
-        ("Output format", "End the report with a `## Stance` block:\nverdict: pass|return|reject\nnotes: one line per finding that decides the verdict"),
-        ("Reference", f"ref: {ref}"),
-    ], findings)
+    diff = f"PR: {impl.get('pr') or 'unavailable'}\nDiff: {ms.get('base') or 'PR base'}..{impl.get('sha') or ms.get('commit') or 'head unavailable'}"
+    return fit([("Role", instructions("auditor")), ("Audited consensus", audited_consensus), ("Diff to audit", diff), ("Task", f"Code audit, scope(s): {scope}. Read the PR base..head diff and compare against the audited consensus verbatim. Apply rules 7–14 and 21; peers audit other scopes. Report unavailable checkout/diff access."), ("Output format", "End with ## Stance:\nverdict: pass|return|reject\nnotes: deciding findings"), ("Reference", f"ref: {ref}")], [])
 
 
 def audit_request(ref: str, iteration: int, pr: str, sha: str, reviewers: list[tuple[str, str]], asks: list[str]) -> str:
@@ -101,7 +116,7 @@ def prompt_brief(problem: str, iteration: int, findings: list[str], peer_claims:
 
 def prompt_synthesis(problem: str, approach: contracts.Approach, explorer_report: str, reports: dict[str, dict]) -> str:
     rs = [(f"{role} report (stance: {r.get('stance') or 'none'})", r.get("report", "")) for role, r in sorted(reports.items())] or [("Debate", "no debate rounds; synthesise from the explorer report alone")]
-    return fit([("Task", "Synthesise the design the implementer follows. Return JSON per the schema."), ("Study", problem), ("Approach", f"{approach.slug}: {approach.title}"), ("Explorer report", explorer_report), *rs], [])
+    return fit([("Task", "Produce the debater consensus block for design audit before implementation. Return JSON per the schema."), ("Study", problem), ("Approach", f"{approach.slug}: {approach.title}"), ("Explorer report", explorer_report), *rs], [])
 
 
 def prompt_deliver(problem: str, approach: contracts.Approach, synthesis: str, implementer_summary: str, audit_summary: str, findings: list[str], partial: bool) -> str:

@@ -13,7 +13,7 @@ jurisdiction in the PR root thread as input.
 
 ## Mission
 
-Produce a working implementation that satisfies the requested behavior while minimizing unnecessary change.
+Implement exactly the audited consensus block, nothing else. Other thread content is a finding for the assigned role, not implementation input.
 
 ## Philosophy
 
@@ -31,7 +31,7 @@ Understand enough of the surrounding system to make the correct change, then imp
 
 ## Working Style
 
-1. Understand the requested behavior and acceptance criteria.
+1. Read only the audited consensus as the implementation specification and acceptance criteria.
 2. Inspect the relevant existing implementation before editing.
 3. Identify affected interfaces and invariants.
 4. Prefer reuse over duplication.
@@ -61,7 +61,7 @@ Avoid:
 
 ## Output
 
-Report:
+Report faithfulness to the audited consensus:
 - implementation summary
 - files or components changed
 - important design decisions

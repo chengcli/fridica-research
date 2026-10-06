@@ -54,7 +54,7 @@ PRs. The first-pass implementer retains revisions and follow-ups for that PR.
 
 ## Working style
 
-7. Identify the claims being made: in the PR body, the issue, and the design (synthesis) it
+7. Identify the claims being made: in the PR body, the issue, and the audited consensus it
    implements.
 8. Decide what evidence each claim needs, then gather it yourself where you can: run the
    validation commands in a fresh environment, and reproduce reported defects with the smallest
@@ -72,34 +72,18 @@ PRs. The first-pass implementer retains revisions and follow-ups for that PR.
 13. Compare behaviour with intent, and the scope of the change with the scope of the problem.
 14. Distinguish correctness from maintainability and style.
 
-### Should this exist? (reuse before build)
-15. For every new mechanism (process control, environment handling, sandboxing, timeouts,
-    retries, storage, auth, budgets), name the concern in one phrase and search the reference
-    repos and lower layers for it (e.g. `env_clear`, `process_group`, `sandbox`, `timeout`).
-16. If a lower layer or sibling repo already provides it, report "duplicates source of truth"
-    as **needs contract decision**, not as a defect to fix in place. The fix is to call or extend
-    the lower layer, or to file an issue there.
-17. A temporary scaffold that needs production-grade review is a sign it should not be built.
+### Two checkpoints
 
-### Layer boundaries
-18. Identify the layer of each changed file and read that layer's charter. For a lower layer
-    (core, store, transport), every new name, enum value, default, constant, schema field or
-    prompt text must be general mechanism. For each one ask:
-    - Who consumes it? If exactly one upstream component would ever use it, it is that
-      component's policy and belongs there.
-    - Would a second, different host want this exact value? If not, it is policy.
-    - Does a default encode a judgement ("missing means disagree")? Judgements are policy.
-    - Does it reach every user of the layer (prompt or schema text sent to all workers)? Weigh
-      the blast radius.
-    - Does the lower-layer diff use vocabulary from the upstream issue or study? Domain words in
-      a general layer are a smell.
-
-### Audit the design, not only the code
-19. If the spec or the synthesis itself asks for a violation (duplication, layer leak,
-    out-of-scope work), do not downgrade it because the code matches the spec. Report it as
-    **needs contract decision** and propose the alternative.
-20. Run rules 15-19 on the issue or synthesis before implementation starts, whenever you are
-    asked to audit a design.
+15. Design audit before Implement: audit only the debater's consensus for reuse before build.
+    Apply preserved design rules 29–31; the explorer report is not audited.
+16. Design audit: enforce the layer boundaries in preserved rule 32 on the consensus.
+17. Design audit: identify design violations using preserved rules 33–34. Pass enables
+    implementation; return goes to Debate; reject stops the study.
+18. Code audit after Implement: read the diff against the audited consensus verbatim and
+    its reference. Require faithful implementation, no more and no less.
+19. Code audit: apply rules 7–14 to the current implementation and its validation evidence.
+20. Code audit: apply rule 21 to invariant violations; put additional design ideas in the
+    thread as findings, not new implementation scope.
 
 ### Report the class, not only the instance
 21. When a finding is one instance of a class (one more secret name a denylist misses, one more
@@ -177,3 +161,37 @@ High-value areas to probe first, each with a confirmed case from the bootstrap s
 - crash between writes (atomic replace)
 - layer boundary (fridica-core#2 stance, a confirmed miss)
 - reuse before build (bootstrap worker runner duplicating fridica's exec, a confirmed miss)
+
+## Preserved design-audit rules
+
+The following original rules 15–20 are retained verbatim except for numbering (now 29–34).
+The historical reference to rules 15–19 in rule 34 means preserved rules 29–33.
+
+### Should this exist? (reuse before build)
+29. For every new mechanism (process control, environment handling, sandboxing, timeouts,
+    retries, storage, auth, budgets), name the concern in one phrase and search the reference
+    repos and lower layers for it (e.g. `env_clear`, `process_group`, `sandbox`, `timeout`).
+30. If a lower layer or sibling repo already provides it, report "duplicates source of truth"
+    as **needs contract decision**, not as a defect to fix in place. The fix is to call or extend
+    the lower layer, or to file an issue there.
+31. A temporary scaffold that needs production-grade review is a sign it should not be built.
+
+### Layer boundaries
+32. Identify the layer of each changed file and read that layer's charter. For a lower layer
+    (core, store, transport), every new name, enum value, default, constant, schema field or
+    prompt text must be general mechanism. For each one ask:
+    - Who consumes it? If exactly one upstream component would ever use it, it is that
+      component's policy and belongs there.
+    - Would a second, different host want this exact value? If not, it is policy.
+    - Does a default encode a judgement ("missing means disagree")? Judgements are policy.
+    - Does it reach every user of the layer (prompt or schema text sent to all workers)? Weigh
+      the blast radius.
+    - Does the lower-layer diff use vocabulary from the upstream issue or study? Domain words in
+      a general layer are a smell.
+
+### Audit the design, not only the code
+33. If the spec or the synthesis itself asks for a violation (duplication, layer leak,
+    out-of-scope work), do not downgrade it because the code matches the spec. Report it as
+    **needs contract decision** and propose the alternative.
+34. Run rules 15-19 on the issue or synthesis before implementation starts, whenever you are
+    asked to audit a design.

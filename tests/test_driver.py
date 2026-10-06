@@ -57,7 +57,7 @@ def test_root_post_starts_a_study_and_runs_to_claim(world):
     job = server.job_of(thread, "explorer")
     assert "ref: " + s.waiting["id"] in job["brief"]
     delegate_body = next(body for method, path, body in server.requests if method == "POST" and path.endswith("/delegate"))
-    assert "# Explorer" in delegate_body["instructions"]
+    assert "# Explorer" in delegate_body["brief"]
     server.finish_job(thread, job["id"], result(report=EXPLORER_REPORT))
     drain(drv)
     s = drv.store.load(thread)
@@ -203,6 +203,8 @@ def test_full_study_through_the_driver(world):
     assert s.stage == "Debate"
     for role in ("mathematician", "physicist"): server.finish_job(thread, server.job_of(thread, role)["id"], result(report=report(position="agree")))
     drain(drv)
+    server.finish_job(thread, server.job_of(thread, "auditor")["id"], result(report=report(verdict="pass")))
+    drain(drv)
     server.finish_job(thread, server.job_of(thread, "implementer")["id"], result(artifacts=["https://github.com/o/r/pull/9"]))
     drain(drv)
     server.finish_job(thread, server.job_of(thread, "auditor")["id"], result(report=report(verdict="pass")))
@@ -210,7 +212,7 @@ def test_full_study_through_the_driver(world):
     s = drv.store.load(thread)
     assert s.stage == "Delivered" and s.followon
     kinds = [m["meta"]["kind"] for m in server.view(thread)["messages"] if m["meta"]]
-    assert kinds == ["study_root", "study_claim", "report", "study_result"]
+    assert kinds == ["study_root", "report", "study_claim", "report", "report", "report", "report", "report", "report", "study_result"]
     child = drv.store.load(s.followon)
     assert child and child.generation == 2 and child.lineage == thread and child.stage == "Explore"
 
@@ -238,3 +240,37 @@ def test_restart_mid_debate_pair_adopts_existing_jobs_and_resends_only_the_missi
     assert sorted(j["role"] for j in s2.group["jobs"].values()) == ["mathematician", "physicist"]
     assert s2.workers["mathematician"]["worker_id"] == server.job_of(thread, "mathematician")["worker_id"]  # adopted, not re-delegated
     assert s2.phase == "job" and s2.waiting["kind"] == "group"
+
+
+def test_design_return_restart_does_not_adopt_old_round_one_jobs(world):
+    """Crash after emitting returned round 1, before delegating: old exact refs must not match."""
+    from fridica_research import machine
+    server, cfg = world
+    cfg = dataclasses.replace(cfg, settle_window=0)
+    thread = "T1:C1:1700000000.000100"
+    server.root(thread, OWNER, root_text())
+    drv = make_driver(cfg)
+    drain(drv)
+    server.finish_job(thread, server.job_of(thread, "explorer")["id"], result(report=EXPLORER_REPORT))
+    drain(drv)
+    old_ids = {j["id"] for j in server.view(thread)["jobs"] if j["role"] == "debater"}
+    for lens in ("mathematician", "physicist"):
+        server.finish_job(thread, server.job_of(thread, lens)["id"], result(report=report(position="agree")))
+    drain(drv)
+    state = drv.store.load(thread)
+    assert state.stage == "DesignAudit"
+    audit_job = next(iter(state.group["jobs"]))
+    # Persist only the machine snapshot, deliberately omit action execution and feed result.
+    state, actions = machine.step(state, machine.Event("job_result", drv.clock(), {"job_id": audit_job, "job_status": "finished", "result": result(report=report(verdict="return"))}), cfg)
+    drv.store.save(state)
+    assert state.stage == "Debate" and not state.group["jobs"]
+    restarted = make_driver(cfg, store=Store(cfg.state_file))
+    drain(restarted)
+    recovered = restarted.store.load(thread)
+    assert recovered.stage == "Debate" and recovered.round == 1
+    assert len(recovered.group["jobs"]) == 2
+    assert old_ids.isdisjoint(recovered.group["jobs"])
+    assert all(j["result"] is None for j in recovered.group["jobs"].values())
+    assert all("/r1/debate-1-" in j["action_id"] for j in recovered.group["jobs"].values())
+    bodies = [body for _, route, body in server.requests if route.endswith("/delegate")]
+    assert all("lens_sha256" not in b and "instructions" not in b for b in bodies)

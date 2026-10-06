@@ -143,18 +143,18 @@ def test_study_and_stage_cards_are_plain_issues_with_one_assignee():
     b.sync(w.state)
     cards = cards_of(meta, w)
     # Audit: one card per scope: the peer's (scope) and the local auditor's (code).
-    assert cards["issue"] == 1 and [[c["issue"] for c in st["cards"]] for st in cards["stages"]] == [[2], [3], [4], [5], [6, 7], [8]]
+    assert cards["issue"] == 1 and [[c["issue"] for c in st["cards"]] for st in cards["stages"]] == [[2], [3], [4], [5], [6], [7, 8], [9]]
     titles = [a[6] for a in gh.argv("gh", "issue", "create")[1:]]
-    assert [t.split(":")[0] for t in titles] == ["Explore (iteration 1)", "Claim (iteration 1)", "Debate (iteration 1)", "Implement (iteration 1)", "Audit scope (iteration 1)", "Audit code (iteration 1, local auditor)", "Deliver (iteration 1)"]
+    assert [t.split(":")[0] for t in titles] == ["Explore (iteration 1)", "Claim (iteration 1)", "Debate (iteration 1)", "DesignAudit (iteration 1)", "Implement (iteration 1)", "Audit scope (iteration 1)", "Audit code (iteration 1, local auditor)", "Deliver (iteration 1)"]
     assigned = {int(a[6].split(":")[0].split()[-1].strip("()")) if False else i + 1: a[a.index("--assignee") + 1] for i, a in enumerate(gh.argv("gh", "issue", "create"))}
-    assert assigned[6] == "reviewer" and assigned[7] == "chengcli"  # the peer's card is the peer's; the owner never assigns itself to it
+    assert assigned[7] == "reviewer" and assigned[8] == "chengcli"  # the peer's card is the peer's; the owner never assigns itself to it
     roles = {v["item"]: v["v"] for v in gh.sets(board.M_SET_OPTION) if v["field"] == "F_role"}
-    assert roles["PVTI_I_6"] == "R_peer-reviewer" and roles["PVTI_I_7"] == "R_auditor" and roles["PVTI_I_4"] == "R_debater" and roles["PVTI_I_8"] == "R_driver"
+    assert roles["PVTI_I_7"] == "R_peer-reviewer" and roles["PVTI_I_8"] == "R_auditor" and roles["PVTI_I_4"] == "R_debater" and roles["PVTI_I_9"] == "R_driver"
     closed = [a[3] for a in gh.argv("gh", "issue", "close")]
-    assert closed == ["2", "3", "4", "5", "7", "8", "1"]  # #6 waits for the reviewer's SIGN-OFF
-    assert not [c for c in flat(cards) if c["issue"] == 6][0]["closed"]
+    assert closed == ["2", "3", "4", "5", "6", "8", "9", "1"]  # #6 waits for the reviewer's SIGN-OFF
+    assert not [c for c in flat(cards) if c["issue"] == 7][0]["closed"]
     done = [v["item"] for v in gh.sets(board.M_SET_OPTION) if v["field"] == "F_status" and v["v"] == "S_Done"]
-    assert done == [f"PVTI_I_{n}" for n in (2, 3, 4, 5, 7, 8, 1)]
+    assert done == [f"PVTI_I_{n}" for n in (2, 3, 4, 5, 6, 8, 9, 1)]
     actual = [v["item"] for v in gh.sets(board.M_SET_NUMBER) if v["field"] == "F_Actual_hours"]
     assert sorted(actual) == sorted(done)
     options = [v["v"] for v in gh.sets(board.M_SET_OPTION) if v["item"] == "PVTI_I_1" and v["field"] == "F_stage"]
@@ -166,8 +166,8 @@ def test_study_and_stage_cards_are_plain_issues_with_one_assignee():
     w.now += 7200
     w.ev("sign_off", sender="UREV", pr=PR, sha=SHA, verdict="approve")
     b.sync(w.state)
-    assert [a[3] for a in gh.argv("gh", "issue", "close")][-1] == "6" and [c for c in flat(cards_of(meta, w)) if c["issue"] == 6][0]["closed"]
-    assert [v for v in gh.sets(board.M_SET_NUMBER) if v["item"] == "PVTI_I_6" and v["field"] == "F_Actual_hours"][0]["v"] == 2.0
+    assert [a[3] for a in gh.argv("gh", "issue", "close")][-1] == "7" and [c for c in flat(cards_of(meta, w)) if c["issue"] == 7][0]["closed"]
+    assert [v for v in gh.sets(board.M_SET_NUMBER) if v["item"] == "PVTI_I_7" and v["field"] == "F_Actual_hours"][0]["v"] == 2.0
 
 
 def test_peer_card_unassigned_until_login_known_never_the_owner():
@@ -192,7 +192,7 @@ def test_role_totals():
     totals = board.role_totals(w.state)
     assert set(totals) == {"explorer", "driver", "debater", "implementer", "auditor", "peer-reviewer"}
     assert totals["explorer"]["projected"] == 0.33 and totals["driver"]["projected"] == round((120 + 600) / 3600, 2)
-    assert totals["peer-reviewer"] == {"projected": 1.5, "actual": 0.5} and totals["auditor"]["projected"] == 1.5
+    assert totals["peer-reviewer"] == {"projected": 1.5, "actual": 0.5} and totals["auditor"]["projected"] == 1.83
 
 
 def test_existing_issue_is_attached_not_created():
@@ -283,6 +283,7 @@ def test_role_totals_pair_each_audit_row_with_its_own_iteration():
     w.tick(CFG.settle_window)
     w.finish("mathematician", result(report=report(position="agree")))
     w.finish("physicist", result(report=report(position="agree")))
+    if w.state.stage == "DesignAudit": w.finish("auditor", result(report=report(verdict="pass")))
     w.finish("implementer", result(artifacts=[PR], machine_state={"branch": "b", "commit": "def5678", "dirty": False}))
     w.now += 3600
     w.ev("sign_off", sender="UREV", pr=PR, sha="def5678", verdict="approve")
@@ -291,7 +292,7 @@ def test_role_totals_pair_each_audit_row_with_its_own_iteration():
     audits = [r for r in w.state.stage_log if r["stage"] == "Audit"]
     assert [r["iteration"] for r in audits] == [1, 2] and [r["scopes"]["scope"]["signed_at"] - r["start"] for r in audits] == [1800, 3600]
     totals = board.role_totals(w.state)
-    assert totals["peer-reviewer"] == {"projected": 3.0, "actual": 1.5} and totals["auditor"]["projected"] == 3.0
+    assert totals["peer-reviewer"] == {"projected": 3.0, "actual": 1.5} and totals["auditor"]["projected"] == 3.67
 
 
 def test_old_iteration_peer_card_does_not_close_on_a_new_iteration_signoff():
@@ -304,8 +305,57 @@ def test_old_iteration_peer_card_does_not_close_on_a_new_iteration_signoff():
     w.tick(CFG.settle_window)
     w.finish("mathematician", result(report=report(position="agree")))
     w.finish("physicist", result(report=report(position="agree")))
+    if w.state.stage == "DesignAudit": w.finish("auditor", result(report=report(verdict="pass")))
     w.finish("implementer", result(artifacts=[PR], machine_state={"branch": "b", "commit": "def5678", "dirty": False}))
     w.ev("sign_off", sender="UREV", pr=PR, sha="def5678", verdict="approve")
     b.sync(w.state)
     peer_cards = [c for c in flat(cards_of(meta, w)) if c["scope"] == "scope"]
-    assert [(c["issue"], c["closed"]) for c in peer_cards] == [(6, False), (12, True)]  # #8-#11 are iteration 2's Explore..Implement
+    assert [(c["issue"], c["closed"]) for c in peer_cards] == [(7, False), (14, True)]  # #8-#11 are iteration 2's Explore..Implement
+
+
+def test_design_stage_option_migration_preserves_options_and_runs_once():
+    """Input fields and existing options captured from real GitHub; success response is selection-pinned."""
+    from pathlib import Path
+    captured = json.loads((Path(__file__).parent / "fixtures/stage_field.json").read_text())
+    stage = captured["stage"]
+    assert {f["name"] for f in captured["input_schema"]["data"]["__type"]["inputFields"]} == {"id", "name", "color", "description"}
+
+    class OldProjectGh(FakeGh):
+        def __init__(self):
+            super().__init__()
+            self.options = stage["options"].copy()
+
+        def answer(self, query, variables):
+            if "updateProjectV2Field(input:" in query:
+                self.options = [dict(option, id=option.get("id", "NEW_OPTION")) for option in variables["options"]]
+                return {"updateProjectV2Field": {"projectV2Field": {"id": stage["id"]}}}
+            data = super().answer(query, variables)
+            if query == board.Q_DISCOVER["user"]:
+                nodes = data["user"]["projectV2"]["fields"]["nodes"]
+                data["user"]["projectV2"]["fields"]["nodes"] = [dict(f, id=stage["id"], options=self.options) if f["name"] == "Stage" else f for f in nodes]
+            return data
+
+    gh = OldProjectGh()
+    b, _, _ = make(gh)
+    b.api.ensure_fields()
+    assert "DesignAudit" in b.api.project().fields["Stage"]["options"]
+    assert gh.options[:len(stage["options"])] == stage["options"]
+    b.api.ensure_fields()
+    assert len([d for _, d in gh.calls if d and "updateProjectV2Field(input:" in d["query"]]) == 1
+
+
+def test_roles_table_in_protocol_issue_and_workers_field_and_repeated_misses():
+    from pathlib import Path
+    from fridica_research import roles
+    w = World(cfg=BCFG)
+    w.to_debate()
+    w.state.mention_misses["Debate/author"] = 2
+    b, gh, _ = make()
+    b.sync(w.state)
+    text = roles.roles_table(roles.holders(w.state, BCFG))
+    assert roles.roles_table() in (Path(__file__).parents[1] / "docs/protocol.md").read_text()
+    bodies = [a[a.index("--body") + 1] for a in gh.argv("gh", "issue", "edit") if "--body" in a]
+    assert text in bodies[0] and '"Debate/author": 2' in bodies[0]
+    workers = [v["v"] for v in gh.sets(board.M_SET_TEXT) if v["field"] == "F_Workers"]
+    assert text in workers[0]
+    assert any(v["field"] == "F_role" and v["v"] == "R_driver" for v in gh.sets(board.M_SET_OPTION))

@@ -35,6 +35,7 @@
   "max_debate_rounds": 2,
   "max_generations": 5,
   "max_iterations": 1,
+  "max_lenses": 3,
   "owner": "UOWNER",
   "people": {
    "UOWNER": "chengcli",
@@ -45,6 +46,8 @@
    "claim": 120,
    "debate": 1200,
    "deliver": 600,
+   "design_audit": 1200,
+   "evidence": 900,
    "explore": 1200,
    "implement": 5400
   },

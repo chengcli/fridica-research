@@ -622,6 +622,7 @@ def test_head_matches_short_sha_guard():
 def test_refuses_to_open_a_pr_without_closes_study_board_milestone():
     g, _ = make(gh := FakeGh())
     good = g.next_pr_body("o/r", "Summary.", 21, "T1:C1:1.2", 2)
+    assert "| driver and arbitrator |" in good and "| explorer |" in good and "| auditor |" in good
     assert contracts.pr_hygiene_missing(good) == [] and "Board: https://github.com/users/chengcli/projects/8" in good and "Milestone: R2" in good
     for line, name in (("Closes #21", "Closes #N"), ("Study thread: T1:C1:1.2", "study thread"), ("Board: https://github.com/users/chengcli/projects/8", "board link"), ("Milestone: R2", "milestone")):
         with pytest.raises(PrHygieneError, match=name): g.open_pr("o/r", "b", "main", "t", good.replace(line, ""))

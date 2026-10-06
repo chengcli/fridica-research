@@ -27,11 +27,10 @@ def test_stance_from_block_or_field():
     assert c.parse_stance(None) == c.Stance()
 
 
-def test_delegate_request_carries_role_instructions():
-    from fridica_research.roles import instructions
-    body = c.DelegateRequest("mathematician", "brief", instructions=instructions("debater", "mathematician")).body()
-    assert "# Debater" in body["instructions"] and "# Mathematician" in body["instructions"]
-    assert "# Physicist" not in body["instructions"]
+def test_delegate_request_has_only_host_fields():
+    body = c.DelegateRequest("debater", "role text in brief").body()
+    assert "instructions" not in body
+    assert set(body) <= c.DELEGATE_FIELDS
 
 
 def test_approaches_prefer_section_and_dedupe():

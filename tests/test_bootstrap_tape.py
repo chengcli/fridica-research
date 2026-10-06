@@ -1,5 +1,5 @@
-"""R7: replay this bootstrap study's stage sequence (explore -> claim -> debate, 2 rounds both revised ->
-implement -> audit -> deliver) through the machine; assert the stage log and the board card sequence
+"""R7: replay this bootstrap study's stage sequence with the new synthetic DesignAudit pass (explore -> claim -> debate, 2 rounds both revised ->
+design audit -> implement -> audit -> deliver) through the machine; assert the stage log and the board card sequence
 (fridica-research issues #1 parent, #2-#7 stages, as on https://github.com/users/chengcli/projects/8)."""
 from __future__ import annotations
 
@@ -21,7 +21,7 @@ STAGE_MIN = {"Explore": 6, "Claim": 1, "Debate": 8, "Implement": 90, "Audit": 90
 
 
 def tape(w: World, sync=lambda: None):
-    """Drive the bootstrap study's events through `w` (the stage sequence and timings of the real run); `sync` runs where the driver would sync the board."""
+    """Drive the bootstrap events through `w`, inserting a zero-duration synthetic design pass; `sync` runs where the driver would sync the board."""
     w.start(thread=THREAD, problem="Bootstrap: implement fridica-research (fridica #126)")
     sync()
     w.now += STAGE_MIN["Explore"] * 60
@@ -40,14 +40,17 @@ def tape(w: World, sync=lambda: None):
     w.finish("mathematician", result(report=report(position="revised", body="concede snapshot store; keep waiting ledger")))
     w.finish("physicist", result(report=report(position="revised", body="concede snapshot; hold no log")))
     sync()
-    assert w.state.stage == "Implement" and w.state.synthesis["synthesis"]
+    assert w.state.stage == "DesignAudit" and w.state.synthesis["synthesis"]
+    sync()
+    w.finish("auditor", result(report=report(verdict="pass")))
+    sync()
     w.now += STAGE_MIN["Implement"] * 60
     w.finish("implementer", result(status="done", artifacts=["https://github.com/chengcli/fridica-research/pull/2"], machine_state={"branch": "study/126-bootstrap", "commit": "deadbeef", "dirty": False}))
     sync()
     assert w.state.stage == "Audit"
     req = [p for p in w.kinds("post") if p["post_kind"] == "report"][-1]["text"]
     assert "<@U_A> (numerics)" in req and "<@U_B> (scope)" in req and "<@U_C> (api)" in req and "sha: deadbeef" in req
-    assert w.state.phase == "signoff" and "auditor" not in w.workers  # every scope has a peer: no local auditor worker (R13)
+    assert w.state.phase == "signoff" and "auditor" not in w.pending  # every scope has a peer: no local auditor worker (R13)
     assert sorted(w.state.audit_scopes) == ["api", "numerics", "scope"]
     sync()
     w.now += 20 * 60
@@ -68,36 +71,36 @@ def test_bootstrap_tape():
     b = board.Board(BOOTSTRAP, runner=gh, remember=meta.__setitem__, recall=meta.get)
     tape(w, lambda: b.sync(w.state))
     # Stage log: one row per stage, in order, each closed, projected from config, actual from the clock.
-    assert [r["stage"] for r in w.state.stage_log] == ["Explore", "Claim", "Debate", "Implement", "Audit", "Deliver"]
+    assert [r["stage"] for r in w.state.stage_log] == ["Explore", "Claim", "Debate", "DesignAudit", "Implement", "Audit", "Deliver"]
     assert all(r["end"] is not None and r["actual"] >= 0 for r in w.state.stage_log)
-    assert [r["projected"] for r in w.state.stage_log] == [600, 120, 1200, 5400, 5400, 600]
-    assert round(w.state.stage_log[2]["actual"] / 60) == STAGE_MIN["Debate"] and round(w.state.stage_log[3]["actual"] / 60) == STAGE_MIN["Implement"]
+    assert [r["projected"] for r in w.state.stage_log] == [600, 120, 1200, 1200, 5400, 5400, 600]
+    assert round(w.state.stage_log[2]["actual"] / 60) == STAGE_MIN["Debate"] and round(w.state.stage_log[4]["actual"] / 60) == STAGE_MIN["Implement"]
     # Delivery post: projected vs actual (R4), PR, sha, audit verdict.
     res = [p for p in w.kinds("post") if p["post_kind"] == "study_result"][-1]["text"]
     assert "projected: 4 h, actual: 3.27 h" in res and "pr: https://github.com/chengcli/fridica-research/pull/2" in res and "audit: pass" in res
-    # Three LLM calls, six delegates (explorer, 2x2 debate, implementer, auditor).
+    # Three LLM calls, seven delegates (explorer, 2x2 debate, design auditor, implementer).
     assert [a["name"] for a in w.kinds("llm_call")] == ["study_brief", "study_synthesis", "study_deliver"]
-    assert [a["role"] for a in w.kinds("delegate")] == ["explorer", "debater", "debater", "debater", "debater", "implementer"]
-    # Board (R9, R13): #1 is the study; #2-#5 Explore..Implement; #6-#8 one audit card per reviewer; #9 Deliver. Plain issues, one assignee each.
+    assert [a["role"] for a in w.kinds("delegate")] == ["explorer", "debater", "debater", "debater", "debater", "auditor", "implementer"]
+    # Board (R9, R13): #1 is the study; #2-#6 Explore..Implement; #7-#9 one audit card per reviewer; #10 Deliver. Plain issues, one assignee each.
     cards = json.loads(meta[f"board:{THREAD}"])
-    assert cards["issue"] == 1 and [[c["issue"] for c in st["cards"]] for st in cards["stages"]] == [[2], [3], [4], [5], [6, 7, 8], [9]] and cards["closed"]
+    assert cards["issue"] == 1 and [[c["issue"] for c in st["cards"]] for st in cards["stages"]] == [[2], [3], [4], [5], [6], [7, 8, 9], [10]] and cards["closed"]
     creates = gh.argv("gh", "issue", "create")
     assert creates[0][6] == "Bootstrap: implement fridica-research (fridica #126)"
-    assert [a[6].split(":")[0] for a in creates[1:]] == ["Explore (iteration 1)", "Claim (iteration 1)", "Debate (iteration 1)", "Implement (iteration 1)", "Audit numerics (iteration 1)", "Audit scope (iteration 1)", "Audit api (iteration 1)", "Deliver (iteration 1)"]
-    assert [a[a.index("--assignee") + 1] for a in creates] == ["chengcli", "chengcli", "chengcli", "chengcli", "chengcli", "a", "b", "c", "chengcli"]
+    assert [a[6].split(":")[0] for a in creates[1:]] == ["Explore (iteration 1)", "Claim (iteration 1)", "Debate (iteration 1)", "DesignAudit (iteration 1)", "Implement (iteration 1)", "Audit numerics (iteration 1)", "Audit scope (iteration 1)", "Audit api (iteration 1)", "Deliver (iteration 1)"]
+    assert [a[a.index("--assignee") + 1] for a in creates] == ["chengcli", "chengcli", "chengcli", "chengcli", "chengcli", "chengcli", "a", "b", "c", "chengcli"]
     assert all(a[8].startswith("Study: #1\n") for a in creates[1:]) and not any("addSubIssue" in (d or {}).get("query", "") for _, d in gh.calls)
-    assert [a[3] for a in gh.argv("gh", "issue", "close")] == ["2", "3", "4", "5", "6", "7", "8", "9", "1"]  # #6 on U_A's sign-off, #7/#8 on theirs, then Deliver and the study
+    assert [a[3] for a in gh.argv("gh", "issue", "close")] == ["2", "3", "4", "5", "6", "7", "8", "9", "10", "1"]  # #7 on U_A's sign-off, #8/#9 on theirs, then Deliver and the study
     roles = {v["item"]: v["v"] for v in gh.sets(board.M_SET_OPTION) if v["field"] == "F_role"}
-    assert roles == {"PVTI_I_1": "R_driver", "PVTI_I_2": "R_explorer", "PVTI_I_3": "R_driver", "PVTI_I_4": "R_debater", "PVTI_I_5": "R_implementer", "PVTI_I_6": "R_peer-reviewer", "PVTI_I_7": "R_peer-reviewer", "PVTI_I_8": "R_peer-reviewer", "PVTI_I_9": "R_driver"}
+    assert roles == {"PVTI_I_1": "R_driver", "PVTI_I_2": "R_explorer", "PVTI_I_3": "R_driver", "PVTI_I_4": "R_debater", "PVTI_I_5": "R_auditor", "PVTI_I_6": "R_implementer", "PVTI_I_7": "R_peer-reviewer", "PVTI_I_8": "R_peer-reviewer", "PVTI_I_9": "R_peer-reviewer", "PVTI_I_10": "R_driver"}
     status = [(v["item"], v["v"]) for v in gh.sets(board.M_SET_OPTION) if v["field"] == "F_status"]
     assert status[:2] == [("PVTI_I_1", "S_In Progress"), ("PVTI_I_2", "S_In Progress")] and status[-1] == ("PVTI_I_1", "S_Done")  # R14
-    assert [i for i, v in status if v == "S_Done"] == [f"PVTI_I_{n}" for n in (2, 3, 4, 5, 6, 7, 8, 9, 1)]
+    assert [i for i, v in status if v == "S_Done"] == [f"PVTI_I_{n}" for n in (2, 3, 4, 5, 6, 7, 8, 9, 10, 1)]
     assert any(v["item"] == "PVTI_I_1" and v["field"] == "F_Peer_reviewers" and v["v"] == "a, b, c" for v in gh.sets(board.M_SET_TEXT))
     stage_opts = [v["v"] for v in gh.sets(board.M_SET_OPTION) if v["item"] == "PVTI_I_1" and v["field"] == "F_stage"]
-    assert stage_opts == ["O_Explore", "O_Explore", "O_Claim", "O_Debate", "O_Implement", "O_Audit", "O_Audit", "O_Audit", "O_Delivered"]  # set at creation, then per sync
+    assert stage_opts == ["O_Explore", "O_Explore", "O_Claim", "O_Debate", "O_DesignAudit", "O_DesignAudit", "O_Implement", "O_Audit", "O_Audit", "O_Audit", "O_Delivered"]  # set at creation, then per sync
     # R12: per-role hours for the study; the peer reviewers' actual time is their sign-off latency.
     totals = board.role_totals(w.state)
-    assert totals["peer-reviewer"] == {"projected": 4.5, "actual": round((20 + 90 + 90) / 60, 2)} and "auditor" not in totals
+    assert totals["peer-reviewer"] == {"projected": 4.5, "actual": round((20 + 90 + 90) / 60, 2)} and totals["auditor"] == {"projected": 0.33, "actual": 0.0}
     assert totals["implementer"] == {"projected": 1.5, "actual": 1.5}
 
 

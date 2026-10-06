@@ -8,8 +8,8 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 
 DEFAULT_PATH = "~/.config/fridica-research/research.toml"
-STAGES = ("explore", "claim", "debate", "implement", "audit", "deliver")
-DEFAULT_PROJECTION = {"explore": 600, "claim": 120, "debate": 1200, "implement": 5400, "audit": 5400, "deliver": 600}
+STAGES = ("explore", "claim", "debate", "design_audit", "evidence", "implement", "audit", "deliver")
+DEFAULT_PROJECTION = {"explore": 600, "claim": 120, "debate": 1200, "design_audit": 1200, "evidence": 900, "implement": 5400, "audit": 5400, "deliver": 600}
 _DURATION = re.compile(r"^\s*(\d+(?:\.\d+)?)\s*([smhd]?)\s*$")
 _UNIT = {"": 1, "s": 1, "m": 60, "h": 3600, "d": 86400}
 
@@ -69,6 +69,7 @@ class Config:
     starters: tuple[str, ...] = ()
     max_iterations: int = 3
     max_debate_rounds: int = 2
+    max_lenses: int = 3  # assumes the host default: three lanes + implementer = four workers
     auditor_backend: str = "other"
     auto_followon: bool = True
     max_generations: int = 5
@@ -85,6 +86,10 @@ class Config:
     llm_model: str = "haiku"
     github: GitHub = field(default_factory=GitHub)
     repos: tuple[Repo, ...] = ()
+
+    def __post_init__(self):
+        object.__setattr__(self, "projection", {**DEFAULT_PROJECTION, **self.projection})
+        if not 2 <= self.max_lenses <= 3: raise ValueError("max_lenses must be 2 or 3 (host default worker cap: 4)")
 
     @property
     def socket_path(self) -> Path: return Path(os.path.expanduser(self.socket))
@@ -122,6 +127,7 @@ class Config:
     def from_dict(cls, d: dict) -> "Config":
         """Inverse of `to_dict` (the replay corpus stores the config as JSON)."""
         d = dict(d)
+        d["projection"] = {**DEFAULT_PROJECTION, **d.get("projection", {})}
         d["board"] = Board(**d.get("board", {}))
         d["reviewers"] = tuple(Reviewer(**r) for r in d.get("reviewers", ()))
         g = dict(d.get("github", {}))
@@ -149,7 +155,7 @@ def parse(text: str) -> Config:
         socket=f.get("socket", Config.socket), capability_file=f.get("capability_file"), owner=str(f.get("owner", "")),
         state_path=raw.get("state_path", Config.state_path),
         channels=tuple(raw.get("channels", [])), starters=tuple(raw.get("starters", [])),
-        max_iterations=int(raw.get("max_iterations", 3)), max_debate_rounds=int(raw.get("max_debate_rounds", 2)),
+        max_iterations=int(raw.get("max_iterations", 3)), max_debate_rounds=int(raw.get("max_debate_rounds", 2)), max_lenses=int(raw.get("max_lenses", 3)),
         auditor_backend=str(raw.get("auditor_backend", "other")), auto_followon=bool(raw.get("auto_followon", True)),
         max_generations=int(raw.get("max_generations", 5)), stage_timeout=duration(raw.get("stage_timeout"), 7200.0),
         settle_window=duration(raw.get("settle_window"), 60.0), idle_sleep=duration(raw.get("idle_sleep"), 2.0),

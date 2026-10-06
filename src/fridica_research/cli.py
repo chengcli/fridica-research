@@ -140,6 +140,7 @@ def main(argv: list[str] | None = None) -> int:
     args = parser().parse_args(argv)
     if args.cmd == "replay": return cmd_replay(args)
     if args.cmd == "roles":
+        print("driver and arbitrator (policy only; never delegated)")
         for role in ROLES:
             print(role + (" (lenses: " + ", ".join(LENSES) + ")" if role == "debater" else ""))
         return 0

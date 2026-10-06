@@ -46,7 +46,7 @@ appearing or disappearing, still counts (D2/D3). Everything else, including
 
 ## Churn policy
 
-- A PR that changes prompt or brief wording leaves the corpora alone: replay reports D1 and passes.
+- A change to brief, prompt, post, role or lens text re-records every corpus it touches and shows the diff; CI needs D0.
 - A PR that changes behaviour (another action, order, id, contract line, state value) must
   regenerate the corpora it affects with `python tests/record_corpora.py` and show the
   regenerated diff in the PR; a D2 on main is a regression.
@@ -60,3 +60,7 @@ appearing or disappearing, still counts (D2/D3). Everything else, including
   revision before the fix.
 - Corpora are checked in, so they must be redaction-clean: the `LEAK` check fails any corpus
   containing a token-like string.
+
+Corpus `011_debate_adds_lens` exercises an overlay-only engineer lens: round 2 runs
+engineer, mathematician and physicist, then passes DesignAudit and code Audit. Bootstrap
+000 preserves historical elapsed times while inserting a synthetic zero-duration DesignAudit pass.

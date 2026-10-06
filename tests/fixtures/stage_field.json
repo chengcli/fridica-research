@@ -1,0 +1,96 @@
+{
+  "stage": {
+    "id": "PVTSSF_lAHOBCRVLc4BlrRwzhkXKKE",
+    "name": "Stage",
+    "options": [
+      {
+        "id": "adc8732c",
+        "name": "Explore",
+        "color": "GRAY",
+        "description": ""
+      },
+      {
+        "id": "037f01fe",
+        "name": "Claim",
+        "color": "GRAY",
+        "description": ""
+      },
+      {
+        "id": "791c0939",
+        "name": "Debate",
+        "color": "GRAY",
+        "description": ""
+      },
+      {
+        "id": "8d1d1caf",
+        "name": "Implement",
+        "color": "GRAY",
+        "description": ""
+      },
+      {
+        "id": "938e09c1",
+        "name": "Audit",
+        "color": "GRAY",
+        "description": ""
+      },
+      {
+        "id": "b434d96c",
+        "name": "Deliver",
+        "color": "GRAY",
+        "description": ""
+      },
+      {
+        "id": "16c5b97f",
+        "name": "Delivered",
+        "color": "GRAY",
+        "description": ""
+      },
+      {
+        "id": "9f67aec8",
+        "name": "Stopped",
+        "color": "GRAY",
+        "description": ""
+      }
+    ]
+  },
+  "input_schema": {
+    "data": {
+      "__type": {
+        "inputFields": [
+          {
+            "name": "id"
+          },
+          {
+            "name": "name"
+          },
+          {
+            "name": "color"
+          },
+          {
+            "name": "description"
+          }
+        ]
+      }
+    }
+  },
+  "denied_mutation": {
+    "data": {
+      "updateProjectV2Field": null
+    },
+    "errors": [
+      {
+        "type": "FORBIDDEN",
+        "path": [
+          "updateProjectV2Field"
+        ],
+        "locations": [
+          {
+            "line": 1,
+            "column": 73
+          }
+        ],
+        "message": "gitlinffff does not have the correct permissions to execute `UpdateProjectV2Field`"
+      }
+    ]
+  }
+}

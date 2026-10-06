@@ -44,7 +44,7 @@ U2 = "peer"
 def test_defaults():
     c = config.parse("")
     assert c.max_iterations == 3 and c.max_debate_rounds == 2 and c.auditor_backend == "other" and c.auto_followon and c.max_generations == 5
-    assert c.projection == {"explore": 600, "claim": 120, "debate": 1200, "implement": 5400, "audit": 5400, "deliver": 600}
+    assert c.projection == {"explore": 600, "claim": 120, "debate": 1200, "design_audit": 1200, "evidence": 900, "implement": 5400, "audit": 5400, "deliver": 600}
     assert c.stage_timeout == 7200 and c.settle_window == 60 and c.idle_sleep == 2 and not c.board.enabled and c.require_signoffs
 
 
@@ -81,3 +81,11 @@ def test_reviewers_with_login_and_scope_and_uncovered_scopes():
     assert c.login_of("U1") == "alice" and c.login_of("U2") == "bob" and c.login_of("U3", {"U3": "late"}) == "late" and c.login_of("U9") == ""
     assert config.parse('[audit]\nreviewers = ["U1"]\n').uncovered_scopes() == ()  # a peer with no scope takes the whole audit
     assert config.Config().uncovered_scopes() == ("scope",)  # no peers: one local audit
+
+
+def test_max_lenses_respects_host_default_worker_limit():
+    for value in (1, 4):
+        with pytest.raises(ValueError, match="max_lenses"):
+            config.parse(f"max_lenses = {value}")
+    assert config.parse("max_lenses = 2").max_lenses == 2
+    assert config.parse("max_lenses = 3").max_lenses == 3

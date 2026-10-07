@@ -22,6 +22,10 @@ CHARTERS = (
 )
 
 
+class BriefOverflow(ValueError):
+    """Mandatory brief content cannot fit the host cap; a stage may retry this failure."""
+
+
 def schema(name: str) -> dict:
     return json.loads(resources.files("fridica_research").joinpath(f"schemas/{name}.json").read_text())
 
@@ -44,7 +48,7 @@ def fit(sections: list[tuple[str, str]], findings: list[str], limit: int = contr
         text = render()
     while len(text) > limit:
         candidates = [(len(b), i) for i, (h, b) in enumerate(sections) if h not in protected and b]
-        if not candidates: raise ValueError("mandatory brief sections exceed the 40,000-character cap")
+        if not candidates: raise BriefOverflow("mandatory brief sections exceed the 40,000-character cap")
         _, i = max(candidates)
         h, body = sections[i]
         sections[i] = (h, body[:max(0, len(body) - (len(text) - limit))])
@@ -114,9 +118,10 @@ def prompt_brief(problem: str, iteration: int, findings: list[str], peer_claims:
     return fit([("Task", f"Write the explorer's brief for iteration {iteration} of this study. Return JSON per the schema."), ("Study", problem), ("Peer claims (approaches taken elsewhere)", "\n".join(sorted(peer_claims)) or "none")], findings)
 
 
-def prompt_synthesis(problem: str, approach: contracts.Approach, explorer_report: str, reports: dict[str, dict]) -> str:
+def prompt_synthesis(problem: str, approach: contracts.Approach, explorer_report: str, reports: dict[str, dict], evidence: list[dict] = (), *, iteration: int = 1) -> str:
     rs = [(f"{role} report (stance: {r.get('stance') or 'none'})", r.get("report", "")) for role, r in sorted(reports.items())] or [("Debate", "no debate rounds; synthesise from the explorer report alone")]
-    return fit([("Task", "Produce the debater consensus block for design audit before implementation. Return JSON per the schema."), ("Study", problem), ("Approach", f"{approach.slug}: {approach.title}"), ("Explorer report", explorer_report), *rs], [])
+    answers = [(f"Evidence answer (return {e['design_returns']}, round {e['round']}, {e['lens']})", e["answer"]) for e in evidence if e.get("iteration") == iteration and e.get("answer")]
+    return fit([("Task", "Produce the debater consensus block for design audit before implementation. Return JSON per the schema."), ("Study", problem), ("Approach", f"{approach.slug}: {approach.title}"), ("Explorer report", explorer_report), *rs, *answers], [])
 
 
 def prompt_deliver(problem: str, approach: contracts.Approach, synthesis: str, implementer_summary: str, audit_summary: str, findings: list[str], partial: bool) -> str:

@@ -1,0 +1,233 @@
+{
+ "approaches": [
+  {
+   "slug": "alpha",
+   "title": "Alpha design",
+   "why": "cheapest"
+  },
+  {
+   "slug": "beta",
+   "title": "Beta design",
+   "why": "robust"
+  },
+  {
+   "slug": "gamma",
+   "title": "Gamma design",
+   "why": "exotic"
+  }
+ ],
+ "attempt": 1,
+ "audit": {
+  "report": "analysis\n\n## Stance\nverdict: pass\nnotes: n\n",
+  "summary": "sum",
+  "verdict": "pass"
+ },
+ "audit_scopes": {
+  "code": {
+   "requested": true,
+   "reviewer": null,
+   "signed_at": null,
+   "verdict": null
+  },
+  "scope": {
+   "requested": true,
+   "reviewer": "UREV",
+   "signed_at": null,
+   "verdict": null
+  }
+ },
+ "audited_consensus": "## Consensus\ndo alpha\n\n### Decisions\n- d1\n\n### Open questions\n\nConsensus reference: T1:C1:1700000000.000100/g1/i1/Debate/a1/synth",
+ "blocked_from": null,
+ "brief": {
+  "brief": "map it",
+  "questions": [
+   "q1"
+  ]
+ },
+ "channel": "C1",
+ "claim": {
+  "slug": "alpha",
+  "status": "owned",
+  "ts": "1700000000.000102"
+ },
+ "consensus": "## Consensus\ndo alpha\n\n### Decisions\n- d1\n\n### Open questions\n\nConsensus reference: T1:C1:1700000000.000100/g1/i1/Debate/a1/synth",
+ "contested": false,
+ "control": "active",
+ "deliverable": {
+  "details": "long details",
+  "next_problem": "next thing",
+  "summary": "delivered"
+ },
+ "design_resume": false,
+ "design_return": "",
+ "design_returns": 0,
+ "evidence": [
+  {
+   "answer": "FINAL_ROUND_EVIDENCE_41",
+   "design_returns": 0,
+   "iteration": 1,
+   "lens": "mathematician",
+   "ref": "T1:C1:1700000000.000100/g1/i1/Debate/a1/evidence-1-mathematician",
+   "request": "question: measure scaling\nsource: repo\nexperiment: probe",
+   "round": 1
+  }
+ ],
+ "excluded": [],
+ "explorer_report": "Findings...\n\n## Approaches\n- alpha: Alpha design -- cheapest\n- beta: Beta design -- robust\n- gamma: Gamma design -- exotic\n",
+ "findings": [],
+ "finished_at": 1700000060.0,
+ "followon": "C1:1700000000.000112",
+ "generation": 1,
+ "group": null,
+ "implementer": {
+  "machine_state": {
+   "branch": "b",
+   "commit": "abc1234",
+   "dirty": false
+  },
+  "pr": "https://github.com/o/r/pull/9",
+  "sha": "abc1234",
+  "status": "done",
+  "summary": "sum"
+ },
+ "iteration": 1,
+ "lenses": {
+  "mathematician": "---\nid: mathematician\nkind: role\nversion: 1\ndescription: Establish definitions, assumptions, derivations, and mathematical consistency.\n---\n\n# Mathematician\n\n## Mission\n\nTurn the problem into simple mathematical frameworks and determine what follows logically from the assumptions.\n\n## Philosophy\n\nPrecision comes before manipulation.\n\nGeneralization comes before specialization.\n\nDefine objects, spaces and assumptions before deriving consequences.\n\nPrefer an explicit argument that can be checked line by line over an intuitive result whose validity is unclear.\n\nSearch for atomic sets, differential equations, integral transforms, bounds, limits, asymptotics, and mappings between spaces.\n\n## Working Style\n\n1. Define the quantities, domains, and notation.\n2. Simplify the problem and state assumptions even if they are far away from reality.\n3. Identify what must be proved, derived, estimated, or computed.\n4. Choose the simplest mathematical formulation that preserves the essential structure.\n5. Non-dimensionalize the problem and identify small numbers.\n6. Derive results step by step.\n7. Search for analytical solutions.\n8. State the range of validity.\n\n## Biases\n\nPrefer:\n- explicit definitions\n- minimal sufficient assumptions\n- derivation over assertion\n- invariants and structure\n- limiting cases\n- consistency checks\n- counterexamples\n\nAvoid:\n- hidden assumptions\n- unexplained algebraic leaps\n- numerical evidence presented as proof\n- unnecessary formalism when a simpler argument is sufficient\n\n## Output\n\nReport:\n- definitions\n- assumptions\n- derivation or proof\n- important intermediate results\n- consistency checks\n- limiting cases\n- conditions under which the result fails or changes\n",
+  "physicist": "---\nid: physicist\nkind: role\nversion: 1\ndescription: Identify physical mechanisms, dominant balances, scales, and observable consequences.\n---\n\n# Physicist\n\n## Mission\n\nDetermine the physical mechanism governing the problem and identify the simplest model that captures it.\n\n## Philosophy\n\nUnderstand the mechanism before increasing model complexity.\n\nEquations and scaling laws are useful because they express physical relationships.\n\nEmpirical results are useful when their physical meaning is understood.\n\nThink in terms of phase space, invariants, symmetries, limiting behavior, particles and waves, classic physical models.\n\nAsk what controls the behavior, which terms dominate, what scales matter, and what would happen in limiting regimes.\n\n## Working Style\n\n1. Identify the relevant physical system and observables.\n2. State the physical assumptions.\n3. Write the governing principles or equations.\n4. Check dimensions and units.\n5. Identify characteristic scales and small numbers in the equations.\n6. Determine the dominant balances.\n7. Simplify equation and examine limiting regimes.\n8. Distill the core and simple useful physical model.\n9. Compare predictions with observations, simulations, or known behavior.\n10. Identify effects neglected by the simplified model.\n11. Apply limited additive corrections to the model.\n12. Propose discriminating tests where mechanisms compete.\n\n## Biases\n\nPrefer:\n- physical mechanism before detailed computation\n- order-of-magnitude estimates\n- dimensional analysis\n- scaling arguments\n- conservation laws\n- limiting regimes\n- comparison with observations\n\nAvoid:\n- treating simulation output as self-explanatory\n- unnecessary mathematical complexity\n- assuming every term in an equation is equally important\n- fitting data without identifying a plausible mechanism\n\n## Output\n\nReport:\n- physical picture\n- assumptions\n- governing balances\n- characteristic scales\n- relevant nondimensional parameters\n- predicted behavior\n- limiting cases\n- observational or numerical tests\n- important missing physics\n"
+ },
+ "lineage": "T1:C1:1700000000.000100",
+ "mention_misses": {},
+ "mention_reminded": [],
+ "notes": [],
+ "overrun_note": "",
+ "partial": false,
+ "peer_claims": {},
+ "pending_lenses": null,
+ "people": {},
+ "phase": "idle",
+ "post_tries": 1,
+ "problem": "Study the thing",
+ "projected_hours": 4.0,
+ "redacted": false,
+ "reports": {
+  "mathematician": {
+   "report": "## Evidence request\nquestion: measure scaling\nsource: repo\nexperiment: probe\n\n## Stance\nposition: revised\nnotes: n\n",
+   "stance": "revised",
+   "summary": "sum"
+  },
+  "physicist": {
+   "report": "analysis\n\n## Stance\nposition: agree\nnotes: n\n",
+   "stance": "agree",
+   "summary": "sum"
+  }
+ },
+ "round": 1,
+ "signoffs": {},
+ "spawner": true,
+ "stage": "Delivered",
+ "stage_log": [
+  {
+   "actual": 0.0,
+   "end": 1700000000.0,
+   "iteration": 1,
+   "projected": 1200,
+   "role": "explorer",
+   "stage": "Explore",
+   "start": 1700000000.0
+  },
+  {
+   "actual": 60.0,
+   "end": 1700000060.0,
+   "iteration": 1,
+   "projected": 120,
+   "role": "driver",
+   "stage": "Claim",
+   "start": 1700000000.0
+  },
+  {
+   "actual": 0.0,
+   "end": 1700000060.0,
+   "iteration": 1,
+   "projected": 1200,
+   "role": "debater",
+   "stage": "Debate",
+   "start": 1700000060.0
+  },
+  {
+   "actual": 0.0,
+   "end": 1700000060.0,
+   "iteration": 1,
+   "projected": 1200,
+   "role": "auditor",
+   "stage": "DesignAudit",
+   "start": 1700000060.0
+  },
+  {
+   "actual": 0.0,
+   "end": 1700000060.0,
+   "iteration": 1,
+   "projected": 5400,
+   "role": "implementer",
+   "stage": "Implement",
+   "start": 1700000060.0
+  },
+  {
+   "actual": 0.0,
+   "end": 1700000060.0,
+   "iteration": 1,
+   "projected": 5400,
+   "role": "auditor",
+   "scopes": {
+    "code": {
+     "requested": true,
+     "reviewer": null,
+     "signed_at": null,
+     "verdict": null
+    },
+    "scope": {
+     "requested": true,
+     "reviewer": "UREV",
+     "signed_at": null,
+     "verdict": null
+    }
+   },
+   "stage": "Audit",
+   "start": 1700000060.0
+  },
+  {
+   "actual": 0.0,
+   "end": 1700000060.0,
+   "iteration": 1,
+   "projected": 600,
+   "role": "driver",
+   "stage": "Deliver",
+   "start": 1700000060.0
+  }
+ ],
+ "started_at": 1700000000.0,
+ "synthesis": {
+  "decisions": [
+   "d1"
+  ],
+  "open_questions": [],
+  "synthesis": "do alpha"
+ },
+ "synthesis_overrun": false,
+ "thread": "T1:C1:1700000000.000100",
+ "timers": {},
+ "waiting": null,
+ "workers": {
+  "implementer": {
+   "live": false,
+   "worker_id": "w-implementer-6"
+  },
+  "mathematician": {
+   "live": false,
+   "worker_id": "w-mathematician-2"
+  },
+  "physicist": {
+   "live": false,
+   "worker_id": "w-physicist-3"
+  }
+ }
+}

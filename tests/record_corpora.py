@@ -161,10 +161,22 @@ def debate_adds_lens():
     return w
 
 
+def final_round_evidence():
+    w = World(cfg=dataclasses.replace(CFG, max_debate_rounds=1))
+    w.to_debate()
+    w.finish("mathematician", result(report=report(position="revised", body="## Evidence request\nquestion: measure scaling\nsource: repo\nexperiment: probe")))
+    w.finish("physicist", result(report=report(position="agree")))
+    w.finish("explorer", result(report="FINAL_ROUND_EVIDENCE_41"))
+    w.finish("auditor", result(report=report(verdict="pass")))
+    w.finish("implementer", result(artifacts=[PR]))
+    w.finish("auditor", result(report=report(verdict="pass")))
+    return w
+
+
 SCENARIOS = {
     "000_bootstrap": bootstrap, "001_simple_research": simple_research, "002_debate_disagreement": debate_disagreement, "003_auditor_return": auditor_return,
     "004_worker_failure": worker_failure, "005_timeout_retry": timeout_retry, "006_peer_claim_conflict": peer_claim_conflict, "007_partial_delivery": partial_delivery,
-    "008_changes_then_timeout": changes_then_timeout, "009_refused_reviewer": refused_reviewer, "010_refused_reviewer_retry": refused_reviewer_retry, "011_debate_adds_lens": debate_adds_lens,
+    "008_changes_then_timeout": changes_then_timeout, "009_refused_reviewer": refused_reviewer, "010_refused_reviewer_retry": refused_reviewer_retry, "011_debate_adds_lens": debate_adds_lens, "012_final_round_evidence": final_round_evidence,
 }
 
 

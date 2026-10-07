@@ -172,8 +172,8 @@ High-value areas to probe first, each with a confirmed case from the bootstrap s
 
 ## Preserved design-audit rules
 
-The following original rules 15–20 are retained verbatim except for numbering (now 29–34).
-The historical reference to rules 15–19 in rule 34 means preserved rules 29–33.
+The following original rules 15–20 are retained as rules 29–34. Rule 34 now names
+preserved rules 29–33 directly; the historical reference was to original rules 15–19.
 
 ### Should this exist? (reuse before build)
 29. For every new mechanism (process control, environment handling, sandboxing, timeouts,
@@ -201,5 +201,5 @@ The historical reference to rules 15–19 in rule 34 means preserved rules 29–
 33. If the spec or the synthesis itself asks for a violation (duplication, layer leak,
     out-of-scope work), do not downgrade it because the code matches the spec. Report it as
     **needs contract decision** and propose the alternative.
-34. Run rules 15-19 on the issue or synthesis before implementation starts, whenever you are
+34. Run rules 29–33 on the issue or synthesis before implementation starts, whenever you are
     asked to audit a design.

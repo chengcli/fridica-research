@@ -76,7 +76,9 @@ this assumes the host's default four-worker limit: three lanes plus the implemen
 
 At most one evidence job is issued per (iteration, design_returns, round). It receives only the lens's
 request; the answer is posted to the thread and enters the next debate brief only within
-the same iteration. Evidence from earlier iterations remains historical state. When loading
+the same iteration. Synthesis also consumes answered evidence from the current iteration,
+including answers received in the final debate round, without starting an extra round.
+Evidence from earlier iterations remains historical state. When loading
 older snapshots without an evidence iteration, recover it from the canonical action reference;
 entries without a recognizable reference are retained but neither rendered nor counted
 against the request limit. No database migration is needed. Its deadline
@@ -87,6 +89,13 @@ an answer stops unfinished jobs and synthesizes with retained reports; that synt
 five minutes, then moves to the next iteration with the overrun finding if unfinished.
 Other debate overruns preserve partial summaries as findings and advance the iteration.
 
+
+`machine.step(state, event, config) -> (state, actions)` is pure; the driver persists the state
+after every step (`store.py`, one SQLite transaction) and executes the actions (`driver.py`).
+Blocked (owner-resumable) and Stopped are the two ways out of the loop. Every outcome of
+executing an action comes back as an event (`delegated`, `delegate_refused`, `llm_result`,
+`post_refused`), so the snapshot in the store is always the fold of `step` over the events
+(`tests/test_rebuild.py`).
 
 ## R1. Stage posts in the study thread
 

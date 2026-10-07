@@ -257,7 +257,7 @@ class M:
         self.arm_overrun()
         try:
             {"Explore": self.enter_explore, "Claim": self.pick, "Debate": self.enter_debate, "DesignAudit": self.enter_design_audit, "Implement": self.enter_implement, "Audit": self.enter_audit, "Deliver": self.enter_deliver}[stage]()
-        except ValueError as error:
+        except briefs.BriefOverflow as error:
             self.retry(f"brief failed: {error}")
 
     def enter_explore(self):
@@ -330,7 +330,7 @@ class M:
     def enter_synthesis(self):
         s = self.s
         s.phase, s.waiting = "llm", {"kind": "llm", "id": self.rid("synth")}
-        self.emit("llm_call", s.waiting["id"], name="study_synthesis", prompt=briefs.prompt_synthesis(s.problem, s.approach(), s.explorer_report, s.reports))
+        self.emit("llm_call", s.waiting["id"], name="study_synthesis", prompt=briefs.prompt_synthesis(s.problem, s.approach(), s.explorer_report, s.reports, s.evidence, iteration=s.iteration))
         self.cancel("timer")
         self.arm("timer", 300 if s.synthesis_overrun else self.cfg.stage_timeout)
 
@@ -877,5 +877,5 @@ def start(thread: str, channel: str, problem: str, now: float, *, generation: in
 def step(state: State, event: Event, cfg: Config) -> tuple[State, list[Action]]:
     m = M(state, event, cfg)
     try: m.run()
-    except ValueError as error: m.retry(f"brief failed: {error}")
+    except briefs.BriefOverflow as error: m.retry(f"brief failed: {error}")
     return m.s, m.out

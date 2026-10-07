@@ -1,0 +1,79 @@
+{
+ "config": {
+  "audit_scopes": [
+   "scope",
+   "code"
+  ],
+  "auditor_backend": "other",
+  "auto_followon": true,
+  "board": {
+   "enabled": false,
+   "number": 0,
+   "owner": "",
+   "owner_type": "user",
+   "repo": "",
+   "token_env": "GH_TOKEN"
+  },
+  "capability_file": null,
+  "channels": [
+   "C1"
+  ],
+  "default_projected_hours": 4.0,
+  "github": {
+   "bots": [
+    "copilot",
+    "copilot-pull-request-reviewer",
+    "github-actions"
+   ],
+   "enabled": false,
+   "poll_interval": 120.0,
+   "post_merge_window": 604800.0,
+   "token_env": "GH_TOKEN"
+  },
+  "idle_sleep": 2.0,
+  "llm_model": "haiku",
+  "max_debate_rounds": 1,
+  "max_generations": 5,
+  "max_iterations": 3,
+  "max_lenses": 3,
+  "owner": "UOWNER",
+  "people": {
+   "UOWNER": "chengcli",
+   "UREV": "reviewer"
+  },
+  "projection": {
+   "audit": 5400,
+   "claim": 120,
+   "debate": 1200,
+   "deliver": 600,
+   "design_audit": 1200,
+   "evidence": 900,
+   "explore": 1200,
+   "implement": 5400
+  },
+  "repos": [],
+  "require_signoffs": false,
+  "reviewers": [
+   {
+    "focus": "scope",
+    "handle": "UREV",
+    "login": ""
+   }
+  ],
+  "settle_window": 60,
+  "socket": "~/.local/state/fridica/control.sock",
+  "stage_timeout": 1000,
+  "starters": [],
+  "state_path": "~/.local/state/fridica-research/state.sqlite3"
+ },
+ "start": {
+  "channel": "C1",
+  "generation": 1,
+  "lineage": "T1:C1:1700000000.000100",
+  "now": 1700000000.0,
+  "problem": "Study the thing",
+  "projected_hours": 4.0,
+  "spawner": true,
+  "thread": "T1:C1:1700000000.000100"
+ }
+}

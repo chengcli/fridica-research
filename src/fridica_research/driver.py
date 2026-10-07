@@ -143,7 +143,7 @@ class Driver:
             elif a.kind == "llm_call":
                 return [self.run_llm(a.id, a["name"], a["prompt"])]
             elif a.kind == "board_update" and self.board is not None:
-                self.board.sync(state)
+                return [Event("finding", now, {"text": finding}) for finding in self.board.sync(state) or []]
         except ControlError as e:
             log.warning("%s %s failed: %s", a.kind, a.id, e)
             if a.kind == "delegate": return [Event("delegate_refused", now, {"action_id": a.id, "code": e.code, "status": e.status, "role": a["role"]})]

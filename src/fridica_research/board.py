@@ -95,6 +95,7 @@ class Projects:
         self.run = runner or subprocess_runner(cfg.board.token_env)
         self.remember, self.recall = remember, recall
         self._project: ProjectIds | None = None
+        self.field_setup_failed = False
 
     def graphql(self, query: str, **variables) -> dict:
         out = json.loads(self.run(["gh", "api", "graphql", "--input", "-"], json.dumps({"query": query, "variables": variables})))
@@ -168,7 +169,11 @@ class Projects:
 
     def set_number(self, issue: int, field: str, value: float): self._set(M_SET_NUMBER, issue, field, v=float(value))
     def set_text(self, issue: int, field: str, value: str): self._set(M_SET_TEXT, issue, field, v=str(value))
-    def set_option(self, issue: int, field: str, option: str): self._set(M_SET_OPTION, issue, field, v=self.field(field)["options"][option])
+    def set_option(self, issue: int, field: str, option: str):
+        options = self.field(field)["options"]
+        # A refused migration must not invent a value or block writes to other fields.
+        if option not in options and self.field_setup_failed: return False
+        self._set(M_SET_OPTION, issue, field, v=options[option])
 
     def verify(self, issue: int) -> dict:
         owner, name = self.b.repo.split("/", 1)
@@ -246,11 +251,22 @@ class Board:
     def title(self, state: State) -> str: return state.problem.strip().splitlines()[0][:80] if state.problem.strip() else state.thread
 
     def sync(self, state: State):
-        if not self.b.enabled: return
+        """Return new setup findings for the driver; persist deduplication with the cards."""
+        if not self.b.enabled: return []
         key = f"board:{state.thread}"
         cards = json.loads(self.recall(key) or "{}") or {"stages": []}
+        findings = []
         try:
-            self.api.ensure_fields()
+            self.api.field_setup_failed = False
+            try:
+                self.api.ensure_fields()
+            except Exception as error:  # noqa: BLE001 - setup failures must not suppress available writes
+                self.api.field_setup_failed = True
+                if not cards.get("field_setup_finding"):
+                    finding = "Board field setup failed; available fields continue syncing. Owner permission/setup action required."
+                    cards["field_setup_finding"] = finding
+                    findings.append(finding)
+                    log.warning("board field setup failed for %s: %s", state.thread, error)
             self.sync_study(state, cards)
             self.sync_stages(state, cards)
             if state.stage in ("Delivered", "Stopped") and not cards.get("closed"):
@@ -260,6 +276,7 @@ class Board:
             log.warning("board update failed for %s: %s", state.thread, e)
         finally:
             self.remember(key, json.dumps(cards))
+        return findings
 
     def open_card(self, cards: list, scope: str | None, title: str, body: str, assignee: str, role: str, stage: str, start: float, projected: float, state: State) -> dict:
         """A plain issue with exactly one assignee (or none, never the owner on a peer's card), In Progress from creation.
@@ -271,21 +288,19 @@ class Board:
             card = {"issue": self.api.create_issue(title, body, assignee), "closed": False, "scope": scope, "assignee": assignee, "filled": False}
             cards.append(card)
         if not card.get("filled", True):
-            self.fill_card(card["issue"], role, stage, start, projected, state)
-            card["filled"] = True
+            card["filled"] = self.fill_card(card["issue"], role, stage, start, projected, state)
         return card
 
     def fill_card(self, number: int, role: str, stage: str, start: float, projected: float, state: State):
         """The project item and its creation-time fields; every write is idempotent, so a retry repeats them all."""
         self.api.add_to_project(number)
-        self.api.set_option(number, "Stage", stage)
-        self.api.set_option(number, "Role", role)
-        self.api.set_status(number, "in_progress")
+        selected = [self.api.set_option(number, "Stage", stage), self.api.set_option(number, "Role", role), self.api.set_status(number, "in_progress")]
         self.api.set_dates(number, started=day(start), projected_finish=day(start + projected))
         self.api.set_number(number, "Projected hours", round(projected / 3600, 2))
         self.api.set_number(number, "Iteration", state.iteration)
         self.api.set_number(number, "Generation", state.generation)
         self.api.set_text(number, "Thread", state.thread)
+        return all(result is not False for result in selected)
 
     def close(self, number: int, finished: str | None, actual_hours: float):
         self.api.set_dates(number, finished=finished)
@@ -296,6 +311,7 @@ class Board:
     def sync_study(self, state: State, cards: dict):
         owner_login = self.login(self.cfg.owner, state)
         body = stage_table(state) + "\n\n" + roles_table(holders(state, self.cfg))
+        if cards.get("field_setup_finding"): body += "\n\nFinding: " + cards["field_setup_finding"]
         misses = {k: v for k, v in state.mention_misses.items() if v >= 2}
         if misses: body += "\n\nRepeated handoff mention misses: " + json.dumps(misses, sort_keys=True)
         if "issue" not in cards:
@@ -304,9 +320,8 @@ class Board:
         n = cards["issue"]
         if not cards.get("filled", True):  # creation-time writes, finished on a later sync if gh failed midway
             if cards.get("given") and owner_login: self.api.edit_issue(n, "--add-assignee", owner_login)
-            self.fill_card(n, "driver", "Explore", state.started_at, state.projected_hours * 3600, state)
+            cards["filled"] = self.fill_card(n, "driver", "Explore", state.started_at, state.projected_hours * 3600, state)
             if owner_login: self.api.set_text(n, "Owner", owner_login)
-            cards["filled"] = True
         self.api.edit_issue(n, "--body", body)
         self.api.set_option(n, "Stage", BOARD_STAGE.get(state.stage, state.stage))
         self.api.set_number(n, "Iteration", state.iteration)

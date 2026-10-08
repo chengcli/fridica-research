@@ -399,9 +399,9 @@ class M:
     def next_iteration(self, note: str):
         s = self.s
         s.findings.append(note)
-        s.target = None
         self.cancel_all()
         if s.iteration < self.cfg.max_iterations:
+            s.target = None
             s.iteration, s.round, s.claim, s.approaches, s.reports, s.synthesis = s.iteration + 1, 0, None, [], {}, {}
             s.consensus, s.audited_consensus, s.design_return = "", "", ""
             s.synthesis_overrun = False

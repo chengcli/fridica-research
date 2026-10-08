@@ -99,3 +99,16 @@ def test_root_delivery_and_card_render_same_revision_metadata():
     for rendered in (post["text"], card):
         assert DRIVER["sha"] in rendered and INPUT["sha"] in rendered and OUTPUT["sha"] in rendered
         assert "generation: 1" in rendered
+
+
+def test_partial_delivery_keeps_committed_target_after_audit_return():
+    from support import CFG, report
+    w = World(cfg=dataclasses.replace(CFG, max_iterations=1))
+    w.to_implement()
+    w.finish("implementer", result(artifacts=["https://github.com/o/input/pull/1"],
+        machine_state={"commit": OUTPUT["sha"], "tree": OUTPUT["tree"], "dirty": False}))
+    assert w.state.target == OUTPUT
+    w.finish("auditor", result(report=report(verdict="return")))
+    assert w.state.partial and w.state.target == OUTPUT
+    post = next(a for a in w.kinds("post") if a["post_kind"] == "study_result")
+    assert OUTPUT["sha"] in post["text"]

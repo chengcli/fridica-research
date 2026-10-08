@@ -53,7 +53,7 @@ def _table(levels: Mapping[str, int] | None) -> dict[str, int]:
             raise ValueError(f"invalid level path glob: {pattern!r}")
         if type(level) is not int or level not in (1, 2, 3):
             raise ValueError(f"invalid level for {pattern!r}: {level!r}")
-    return {**DEFAULT_LEVELS, **levels}
+    return {**DEFAULT_LEVELS, **{pattern: max(level, DEFAULT_LEVELS.get(pattern, 0)) for pattern, level in levels.items()}}
 
 
 def _matches(path: str, pattern: str) -> bool:

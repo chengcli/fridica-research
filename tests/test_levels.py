@@ -137,3 +137,8 @@ def test_require_clean_refuses_dirty_tree_without_mutation(repo: Path, kind: str
 
 def test_require_clean_accepts_clean_tree(repo: Path):
     assert require_clean(repo) is None
+
+
+def test_custom_rules_cannot_lower_default_classification():
+    assert classify("tests/test_case.py", {"tests/**": 1}) == 3
+    assert classify("src/fridica_research/machine.py", {"src/fridica_research/machine.py": 1}) == 2

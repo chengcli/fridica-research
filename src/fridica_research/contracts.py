@@ -232,7 +232,7 @@ def parse_approaches(report: str) -> list[Approach]:
     return out
 
 
-_SIGNOFF = re.compile(r"SIGN-OFF[ \t]+(?P<pr>\S+)[ \t]+(?P<sha>[0-9a-f]{7,40})[ \t]+(?P<verdict>approve|changes)(?: \(code review\))?[ \t]*")
+_SIGNOFF = re.compile(r"SIGN-OFF[ \t]+(?P<pr><[^<>\r\n]+>|\S+)[ \t]+(?P<sha>[0-9a-f]{7,40})[ \t]+(?P<verdict>approve|changes)(?: \(code review\))?[ \t]*")
 
 
 @dataclass(frozen=True)
@@ -264,7 +264,10 @@ _PR_SHORT = re.compile(r"^(?:(?P<repo>[\w.-]+/[\w.-]+)#|#?)(?P<n>\d+)$")
 
 def pr_id(x: str) -> tuple[str, str]:
     """`(owner/repo, number)` of a PR named as a URL, `owner/repo#N`, `#N` or `N`; the repo is "" when the name does not carry it."""
-    x = str(x).strip().rstrip("/")
+    x = str(x).strip()
+    wrapped = re.fullmatch(r"<(https://github\.com/[^<>|\s]+)(?:\|[^<>\r\n]+)?>", x)
+    if wrapped: x = wrapped.group(1)
+    x = x.rstrip("/")
     m = _PR_URL.fullmatch(x) or _PR_SHORT.fullmatch(x)
     if not m: return "", ""
     return (m.group("repo") or "").lower(), m.group("n")

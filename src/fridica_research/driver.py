@@ -192,7 +192,7 @@ class Driver:
                 continue
             if w["kind"] == "llm":
                 name = {"brief": "study_brief", "synth": "study_synthesis", "deliver": "study_deliver"}[w["id"].rsplit("/", 1)[1]]
-                prompt = {"study_brief": lambda: briefs.prompt_brief(s.problem, s.iteration, s.findings, s.peer_claims), "study_synthesis": lambda: briefs.prompt_synthesis(s.problem, s.approach(), s.explorer_report, s.reports), "study_deliver": lambda: briefs.prompt_deliver(s.problem, s.approach(), s.synthesis.get("synthesis", ""), s.implementer.get("summary", ""), s.audit.get("summary", ""), s.findings, s.partial)}[name]()
+                prompt = {"study_brief": lambda: briefs.prompt_brief(s.problem, s.iteration, s.findings, s.peer_claims), "study_synthesis": lambda: briefs.prompt_synthesis(s.problem, s.approach(), s.explorer_report, s.reports, s.evidence, iteration=s.iteration), "study_deliver": lambda: briefs.prompt_deliver(s.problem, s.approach(), s.synthesis.get("synthesis", ""), s.implementer.get("summary", ""), s.audit.get("summary", ""), s.findings, s.partial)}[name]()
                 self.apply(s.thread, self.run_llm(w["id"], name, prompt))
             elif w["kind"] in ("group", "slot"):
                 known = {j.get("action_id") for j in s.group["jobs"].values()}

@@ -112,3 +112,25 @@ def test_partial_delivery_keeps_committed_target_after_audit_return():
     assert w.state.partial and w.state.target == OUTPUT
     post = next(a for a in w.kinds("post") if a["post_kind"] == "study_result")
     assert OUTPUT["sha"] in post["text"]
+
+
+def test_followon_does_not_inherit_its_grandparent_revision():
+    from fridica_research import contracts
+    from support import CFG, report
+    w = World(cfg=dataclasses.replace(CFG, max_generations=3))
+    w.start(generation=2, subject=INPUT,
+        bootstrap={"self_host": True, "parent_revision": "a" * 40})
+    w.finish("explorer", result(report="## Approaches\n- alpha: test"))
+    w.tick(w.cfg.settle_window)
+    for lane in ("mathematician", "physicist"):
+        w.finish(lane, result(report=report(position="agree")))
+    w.finish("auditor", result(report=report(verdict="pass")))
+    w.finish("implementer", result(artifacts=["https://github.com/o/input/pull/1"],
+        machine_state={"commit": OUTPUT["sha"], "tree": OUTPUT["tree"], "dirty": False}))
+    w.finish("auditor", result(report=report(verdict="pass")))
+    post = next(a for a in w.kinds("post") if a["post_kind"] == "study_root")
+    root = contracts.parse_root(post["text"])
+    assert root.generation == 3 and root.subject == OUTPUT
+    assert root.bootstrap["parent_revision"] is None
+    assert root.bootstrap["self_host"] is True
+    assert w.state.bootstrap["parent_revision"] == "a" * 40

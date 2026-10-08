@@ -69,6 +69,8 @@ class Driver:
                 root = contracts.parse_root(text)
                 gen = root.generation if root.generation is not None else (1 if own else self.cfg.max_generations)
                 subject, bootstrap = root.subject, root.bootstrap
+                if own and gen > 1:
+                    bootstrap = {**(bootstrap or {}), "parent_revision": None}
                 if own and subject and gen > 1:
                     parent_sha = self.store.get_meta(f"github:revision:{subject['repo']}:g{gen - 1}")
                     parent = provenance.identity({"repo": subject["repo"], "sha": parent_sha, "tree": None})

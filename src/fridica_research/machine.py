@@ -780,7 +780,7 @@ class M:
         elif kind == "study_result" and s.stage == "Deliver":
             s.waiting = None
             if self.cfg.auto_followon and s.spawner and s.generation < self.cfg.max_generations and s.deliverable.get("next_problem"):
-                text = contracts.format_root(s.deliverable["next_problem"], s.generation + 1, s.lineage or s.thread, s.projected_hours, self.aid("root"), producer=s.producer, subject=s.target or s.subject, bootstrap=s.bootstrap)
+                text = contracts.format_root(s.deliverable["next_problem"], s.generation + 1, s.lineage or s.thread, s.projected_hours, self.aid("root"), producer=s.producer, subject=s.target or s.subject, bootstrap={**s.bootstrap, "parent_revision": None})
                 self.post("root", "study_root", text)
             else: self.finish()
         elif kind == "study_root" and s.stage == "Deliver":

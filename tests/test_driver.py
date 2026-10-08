@@ -300,3 +300,20 @@ def test_provenance_uses_running_driver_and_existing_merged_revision(world, monk
     drv.producer = changed
     drv.apply(thread, machine.Event("finding", drv.clock(), {"text": "continued"}))
     assert drv.store.load(thread).producer == changed
+
+
+@pytest.mark.parametrize("subject", [None, {"repo": "o/input", "sha": "e" * 40, "tree": None}])
+def test_missing_parent_merge_does_not_reuse_inherited_revision(world, subject):
+    from fridica_research import contracts
+    server, cfg = world
+    drv = make_driver(cfg)
+    drv.store.set_meta("github:revision:o/input:g1", "c" * 40)
+    thread = "T1:C1:1700000000.000100"
+    text = contracts.format_root("Third study", 3, "parent", 2, "start",
+        subject=subject, bootstrap={"self_host": True, "parent_revision": "c" * 40})
+    server.root(thread, OWNER, text)
+    drain(drv)
+    state = drv.store.load(thread)
+    assert state.subject == subject
+    assert state.bootstrap["parent_revision"] is None
+    assert state.bootstrap["self_host"] is True

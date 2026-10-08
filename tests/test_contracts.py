@@ -67,3 +67,14 @@ def test_post_request_rejects_unknown_kind_and_view_lookups():
     v = c.ThreadView.from_json({"session": {"control": "paused"}, "messages": [{"ts": "1", "sender": "U", "text": "a\nref: R1"}], "jobs": [{"id": "j", "brief": "ref: R2\n"}, {"id": "k", "brief": "", "tags": ["R3"]}]})
     assert v.control == "paused" and v.own_post_with_ref("R1", "U")["ts"] == "1" and v.own_post_with_ref("R1", "X") is None
     assert [j["id"] for j in v.jobs_with_ref("R2")] == ["j"] and [j["id"] for j in v.jobs_with_ref("R3")] == ["k"]
+
+
+def test_explorer_brief_requires_reuse_for_each_concern():
+    from fridica_research import briefs
+    text = briefs.explorer("R1", "New mechanism", "Investigate", [], [], {})
+    import re
+    sections = {"Role": text.split("## Role\n", 1)[1].split("\n## Study\n", 1)[0].lower(), "Task": re.search(r"^## Task\n(.*?)(?=^## |\Z)", text, re.M | re.S).group(1).lower()}
+    assert "for each concern" in sections["Role"]
+    assert "for each concern" in sections["Task"]
+    assert "source" in sections["Task"]
+    assert "gap" in sections["Task"]

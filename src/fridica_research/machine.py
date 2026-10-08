@@ -847,12 +847,10 @@ MIN_SHA = 7  # the shortest sha prefix that names a head
 
 
 def head_matches(pr: str, sha: str, reviewed_pr: str, reviewed_sha: str) -> bool:
-    """A sign-off counts only for the reviewed head: the same PR (URL, `owner/repo#N`, `#N` or `N`; the repository
-    is compared whenever both names carry one) and the same sha, either side abbreviated to at least 7 hex digits;
-    an unknown head cannot be matched and is accepted."""
-    pr_ok = not reviewed_pr or contracts.same_pr(pr, reviewed_pr)
+    """Count only a known PR/head, with a matching repository and valid SHA prefix."""
+    pr_ok = bool(reviewed_pr) and contracts.same_pr(pr, reviewed_pr)
     a, b = sorted((str(sha).strip().lower(), str(reviewed_sha).strip().lower()), key=len)
-    sha_ok = not reviewed_sha or (len(a) >= MIN_SHA and b.startswith(a))
+    sha_ok = bool(re.fullmatch(r"[0-9a-f]{7,40}", a) and re.fullmatch(r"[0-9a-f]{7,40}", b) and b.startswith(a))
     return pr_ok and sha_ok
 
 

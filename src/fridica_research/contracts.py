@@ -220,7 +220,7 @@ def parse_approaches(report: str) -> list[Approach]:
     return out
 
 
-_SIGNOFF = re.compile(r"SIGN-OFF\s+(?P<pr>\S+)\s+(?P<sha>[0-9a-f]{7,40})\s+(?P<verdict>approve|changes)\b", re.I)
+_SIGNOFF = re.compile(r"SIGN-OFF[ \t]+(?P<pr>\S+)[ \t]+(?P<sha>[0-9a-f]{7,40})[ \t]+(?P<verdict>approve|changes)(?: \(code review\))?[ \t]*")
 
 
 @dataclass(frozen=True)
@@ -232,8 +232,16 @@ class SignOff:
 
 def parse_signoff(text: str) -> SignOff | None:
     if MIRROR_MARK in text: return None  # the driver's mirror of a GitHub review is the record, never a sign-off (R21)
-    m = _SIGNOFF.search(text)
-    return SignOff(m.group("pr"), m.group("sha"), m.group("verdict").lower()) if m else None
+    fence = ""
+    for line in text.splitlines():
+        marker = re.match(r"^\s*(`{3,}|~{3,})", line)
+        if marker:
+            if not fence: fence = marker.group(1)[0]
+            elif marker.group(1)[0] == fence: fence = ""
+            continue
+        m = _SIGNOFF.fullmatch(line) if not fence else None
+        if m: return SignOff(m.group("pr"), m.group("sha"), m.group("verdict"))
+    return None
 
 
 # -- GitHub pull requests (R21, R23, R24) ------------------------------------------

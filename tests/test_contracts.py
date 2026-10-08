@@ -56,7 +56,7 @@ def test_approaches_normalize_matching_slug_wrappers():
 
 
 def test_signoff_and_login():
-    assert c.parse_signoff("ok SIGN-OFF https://github.com/o/r/pull/9 abc1234 Approve") == c.SignOff("https://github.com/o/r/pull/9", "abc1234", "approve")
+    assert c.parse_signoff("SIGN-OFF https://github.com/o/r/pull/9 abc1234 approve") == c.SignOff("https://github.com/o/r/pull/9", "abc1234", "approve")
     assert c.parse_signoff("SIGN-OFF pr sha approve") is None
     assert c.parse_login_reply("github: chengcli") == "chengcli" and c.parse_login_reply("@cheng-cli") == "cheng-cli" and c.parse_login_reply("two words") is None
 
@@ -78,3 +78,12 @@ def test_explorer_brief_requires_reuse_for_each_concern():
     assert "for each concern" in sections["Task"]
     assert "source" in sections["Task"]
     assert "gap" in sections["Task"]
+
+def test_signoff_only_accepts_standalone_unquoted_canonical_lines():
+    valid = "SIGN-OFF o/r#9 abc1234 approve"
+    assert c.parse_signoff("Review complete.\n" + valid + " (code review)\n") == c.SignOff("o/r#9", "abc1234", "approve")
+    for text in ("not yet a " + valid, "> " + valid, "`" + valid + "`",
+                 "\n```text\n" + valid + "\n```", "    " + valid,
+                 valid.replace("SIGN-OFF", "sign-off"), valid.replace("abc1234", "ABC1234"),
+                 valid.replace("approve", "Approve"), valid + " later"):
+        assert c.parse_signoff(text) is None, text

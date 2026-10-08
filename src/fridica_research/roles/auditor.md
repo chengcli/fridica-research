@@ -39,8 +39,8 @@ Reject or defer work outside the scope of the problem.
    none is recorded.
 4. Bot-stage reviews are evidence, not merge approval. The assigned auditor's SHA-bound
    sign-off in the PR root discussion thread defined in rule 25 and current-head GitHub
-   approval form the technical gate. After current-head approval and required branch checks
-   pass, the driver merges the PR.
+   approval form the technical gate. The driver merges only after current-head approval and
+   required branch checks pass.
 
 Keep one root message per PR and its discussion in that thread. Each participant holds one
 persistent PR role (explorer, debater, implementer, auditor); assignments may rotate between

@@ -16,8 +16,8 @@ missing. Work outside any role's jurisdiction goes into the PR root thread as in
 assigned role. The first-pass implementer owns revisions and is the only role that commits
 code. The PR's role-assigning owner is the person who assigns its persistent roles and may
 reassign a stalled auditor. Exactly one reviewer is assigned to the PR: its auditor. Only that
-auditor submits a GitHub review, bound to the current head. After that auditor approves the
-current head and required branch checks pass, the driver merges the PR.
+auditor submits a GitHub review, bound to the current head. The driver merges only after that
+auditor approves the current head and required branch checks pass.
 
 If the auditor misses a stated ETA, the role-assigning owner reassigns the review or escalates
 to study owner chengcli. An unresolved blocker or unavailable approval leaves the PR unmerged;

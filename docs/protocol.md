@@ -416,6 +416,9 @@ Generation remains `State.generation` and the existing `g<n>` action IDs. For a
 follow-on, `github:revision:<repo>:g<n>` remains the only merged-revision source:
 a recorded parent merge supplies the next subject commit and
 `bootstrap.parent_revision`. Until a tree is supplied, its tree is null.
+Without the immediate parent's merge record, `parent_revision` stays null.
+The existing key is not lineage-qualified: concurrent lineages for the same
+repository and generation can overwrite it. This bundle does not disambiguate them.
 No second generation counter or merge-revision store is introduced.
 
 `BootstrapPolicy` records `self_host`, `parent_revision`, `require_replay`,

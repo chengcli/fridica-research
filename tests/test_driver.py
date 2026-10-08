@@ -95,7 +95,7 @@ def test_human_signoff_and_login_replies_are_translated(world):
     server.message(thread, "UHUMAN", "looks good to me")
     drain(drv)
     s = drv.store.load(thread)
-    assert s.signoffs == {REV: "approve"} and s.people == {REV: "reviewer-login"}
+    assert s.signoffs == {} and s.people == {REV: "reviewer-login"}
 
 
 def test_owner_stop_command_is_applied(world):
@@ -274,3 +274,29 @@ def test_design_return_restart_does_not_adopt_old_round_one_jobs(world):
     assert all("/r1/debate-1-" in j["action_id"] for j in recovered.group["jobs"].values())
     bodies = [body for _, route, body in server.requests if route.endswith("/delegate")]
     assert all("lens_sha256" not in b and "instructions" not in b for b in bodies)
+
+
+def test_provenance_uses_running_driver_and_existing_merged_revision(world, monkeypatch):
+    from fridica_research import contracts, provenance, machine
+    from dataclasses import asdict
+    producer = {"repo": "o/driver", "sha": "a" * 40, "tree": "b" * 40}
+    subject = {"repo": "o/input", "sha": "c" * 40, "tree": "d" * 40}
+    monkeypatch.setattr(provenance, "running_revision", lambda: producer)
+    server, cfg = world
+    drv = make_driver(cfg)
+    drv.store.set_meta("github:revision:o/input:g1", "e" * 40)
+    thread = "T1:C1:1700000000.000100"
+    text = contracts.format_root("Next study", 2, "parent", 2, "start",
+        producer=subject, subject=subject, bootstrap=asdict(provenance.BootstrapPolicy()))
+    server.root(thread, OWNER, text)
+    drain(drv)
+    state = drv.store.load(thread)
+    assert state.producer == producer
+    assert state.subject == {"repo": "o/input", "sha": "e" * 40, "tree": None}
+    assert state.bootstrap["parent_revision"] == "e" * 40
+    body = next(body for method, path, body in server.requests if path.endswith("/delegate"))
+    assert not ({"producer", "subject", "target", "bootstrap", "generation"} & body.keys())
+    changed = {**producer, "sha": "f" * 40}
+    drv.producer = changed
+    drv.apply(thread, machine.Event("finding", drv.clock(), {"text": "continued"}))
+    assert drv.store.load(thread).producer == changed

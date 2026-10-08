@@ -23,7 +23,7 @@ from .config import Config
 
 FILES = ("config.json", "events.jsonl", "expected_actions.jsonl", "expected_final_state.json")
 TEXT_KEYS = ("brief", "prompt", "text", "details")
-CONTRACT_KEYS = ("ref", "stage", "approach", "why", "also_considered", "generation", "lineage", "projected", "producer")  # every `contracts.lines` key a peer or the driver parses
+CONTRACT_KEYS = ("ref", "stage", "approach", "why", "also_considered", "generation", "lineage", "projected", "producer", "subject", "target", "bootstrap")  # every `contracts.lines` key a peer or the driver parses
 VOLATILE = ("started_at", "finished_at", "signed_at", "start", "end", "actual")  # values masked everywhere, presence and null-ness still compared (tests/bootstrap/README.md)
 TOKEN = re.compile(r"sk-[A-Za-z0-9]|ghp_|xoxb-|xoxp-|Bearer\s+[A-Za-z0-9]")
 PASSES = {"D0": lambda strict, added: True, "D1": lambda strict, added: not strict, "D2": lambda strict, added: False, "D3": lambda strict, added: added, "LEAK": lambda strict, added: False}
@@ -78,7 +78,7 @@ def record(dir_: Path, cfg: Config, start: dict, events: list[machine.Event]) ->
 
 
 def fold(cfg: Config, start: dict, events: list[machine.Event]) -> tuple[machine.State, list[machine.Action]]:
-    s, actions = machine.start(start["thread"], start["channel"], start["problem"], start["now"], generation=start.get("generation", 1), lineage=start.get("lineage", ""), spawner=start.get("spawner", True), projected_hours=start["projected_hours"], cfg=cfg)
+    s, actions = machine.start(start["thread"], start["channel"], start["problem"], start["now"], generation=start.get("generation", 1), lineage=start.get("lineage", ""), spawner=start.get("spawner", True), projected_hours=start["projected_hours"], cfg=cfg, producer=start.get("producer"), subject=start.get("subject"), bootstrap=start.get("bootstrap"))
     out = list(actions)
     for ev in events:
         s, a = machine.step(s, ev, cfg)

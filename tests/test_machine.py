@@ -538,7 +538,7 @@ def test_round5_a_withdrawn_approval_reopens_only_an_approved_scope_on_the_revie
 
 def test_signoff_cannot_close_scope_for_unknown_head_or_wrong_repository():
     cfg = dataclasses.replace(CFG, require_signoffs=True)
-    for wrong_pr, reviewed_sha in (("https://github.com/other/r/pull/9", SHA), (PR, "")):
+    for wrong_pr, reviewed_sha in (("https://github.com/other/r/pull/9", SHA), ("https://evil.example/github.com/o/r/pull/9", SHA), (PR, "")):
         w = World(cfg=cfg)
         w.to_audit()
         w.state.implementer["sha"] = reviewed_sha

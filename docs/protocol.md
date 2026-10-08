@@ -183,10 +183,10 @@ above. Peer sign-offs do not replace the PR's single assigned auditor or GitHub 
 Entering Audit posts the PR link and exact head SHA (from the implementer's `machine_state` and
 artifacts), @-mentions the `[audit] reviewers` with their scope, states the sign-off line format,
 and delegates the auditor worker (ephemeral, `auditor_backend`, default `other`) only for the
-scopes no peer takes (R13). Human replies containing `SIGN-OFF <pr> <sha> approve|changes` from
+scopes no peer takes (R13). Standalone, unquoted lines `SIGN-OFF <pr> <sha> approve|changes` from
 a configured reviewer are recorded on every scope that reviewer takes, and only when the line
 names the reviewed head: the PR of the audit request (as a URL, `#N` or `N`) and a prefix of its
-sha (`machine.head_matches`; with no PR or sha known there is nothing to check). A sign-off for another PR or sha is ignored and noted as a finding
+sha (`machine.head_matches`; an unknown PR or head never counts). A sign-off for another PR or sha is ignored and noted as a finding
 (`sign-off from <user> ignored: ... is not the reviewed head ...`), so a sign-off on a different
 head never closes a peer's card. With `require_signoffs = true`
 (default) the stage waits (after the local auditor's `pass`, if any) until every peer scope is
@@ -396,6 +396,42 @@ review by <login> on <repo>#<n>`), one finding per item of the review body (each
 so an item added after that body was prepared goes into the following PR. The reviewer's audit
 card closes on their review whichever side of the merge it lands.
 
+## Repository provenance (R2)
+
+`producer` identifies the running driver's Git repository, full commit and tree.
+`subject` identifies the **input repository revision** examined by the study; it
+is not an in-toto output subject. `target` identifies the committed output revision
+and is null before a clean, committed implementer result exists. Missing identities
+stay null; abbreviated commits are not expanded by guessing. A dirty HEAD records
+`dirty: true`: its commit/tree identify the committed baseline, not uncommitted code.
+An installed package without Git metadata reports an unavailable producer.
+
+Use `start --repo <local-checkout> --revision <ref>` to resolve input metadata
+without fetching. Revisions travel in State, action records, root/delivery text and
+the study card. The driver records its own running revision, ignoring a root's
+producer claim; execution after restart records the new producer on subsequent
+events. Provenance fields are internal records, never extra host delegate fields.
+
+Generation remains `State.generation` and the existing `g<n>` action IDs. For a
+follow-on, `github:revision:<repo>:g<n>` remains the only merged-revision source:
+a recorded parent merge supplies the next subject commit and
+`bootstrap.parent_revision`. Until a tree is supplied, its tree is null.
+No second generation counter or merge-revision store is introduced.
+
+`BootstrapPolicy` records `self_host`, `parent_revision`, `require_replay`,
+`require_external_audit` and `require_child_boot`. These are metadata, not proof
+that checks ran. External audit means the assigned auditor's approval on the
+current PR head under R23/R24, together with required GitHub checks; no distinct
+backend is required. Timeout and partial delivery never authorize merge.
+Self-host execution, policy-version gates, candidate creation, activation,
+re-exec, rollback and child health remain deferred to #29.
+
+Unknown State keys are ignored with one finding listing only their names. Snapshot
+loads preserve deep-copy isolation and the evidence-iteration migration.
+The R20 `levels.diff_level` utility classifies a clean candidate's changed paths,
+including both rename sides, with the highest matching level. It does not create
+or activate candidates.
+
 ## R25. Handover ledger
 
 What fridica-research does after each PR, and what the scaffold (R0) still does. Each PR adds its row.
@@ -403,6 +439,7 @@ What fridica-research does after each PR, and what the scaffold (R0) still does.
 | After | fridica-research does | scaffold still does |
 |---|---|---|
 | PR4 github | requests reviews, polls them, closes audit cards, merges fridica-research PRs | reads Slack, relays to the journal |
+| R2 bundle | provenance, clean diff classification, bounded GitHub acknowledgements, strict head binding and evidence replay | reads Slack and relays; self-host activation remains #29 |
 
 ## Failure handling
 
@@ -446,7 +483,10 @@ never cut. The final reference is rendered after shrinking. Oversized mandatory 
 the stage. Implementer input excludes Study, Approach, explorer text and other findings;
 auditor input excludes explorer text and implementer summaries.
 
-SIGN-OFF grammar changes are issue #33; R21 polling stays. Its existing host view prior art
+SIGN-OFF uses a case-sensitive standalone line with a lowercase 7–40 digit hex SHA;
+quoted, fenced, indented or prefixed templates do not count. The exact optional
+` (code review)` suffix is accepted. Repository-qualified names must match the full
+owner/repository identity; unqualified `#N` is bound to this study’s known PR. R21 polling stays. Its existing host view prior art
 is [fridica view.rs, lines 95–145](https://github.com/chengcli/fridica/blob/fefd4c3fe214f2a9d8bcd114e5238c3518696714/src/github/view.rs#L95-L145);
 this reference is guidance, not a runtime dependency. Host instructions support belongs to
 fridica #138; projection budget replacement belongs to #39. Issue 38 changes neither.

@@ -109,7 +109,7 @@ def audit_request(ref: str, iteration: int, pr: str, sha: str, reviewers: list[t
     """The R6 post: PR link, exact head SHA, reviewers with focus, and the SIGN-OFF line format."""
     who = "\n".join(f"<@{h}> ({f})" if f else f"<@{h}>" for h, f in reviewers) or "(no peer reviewers configured)"
     ask = "".join(f"\n<@{h}> please reply with your GitHub login" for h in asks)
-    return "\n".join([contracts.stage_line("Audit", iteration), f"pr: {pr or 'none'}", f"sha: {sha or 'none'}", "reviewers:", who, f"Reply `SIGN-OFF {pr or '<pr>'} {sha or '<sha>'} approve|changes` or accept/refute/needs contract decision items. No merge without a human." + ask, f"ref: {ref}"])
+    return "\n".join([contracts.stage_line("Audit", iteration), f"pr: {pr or 'none'}", f"sha: {sha or 'none'}", "reviewers:", who, f"Reply `SIGN-OFF {pr or '<pr>'} {sha or '<sha>'} approve|changes` or accept/refute/needs contract decision items. Driver merge follows R23/R24; a study-stage sign-off alone does not authorize merge." + ask, f"ref: {ref}"])
 
 
 # --- LLM prompts (three calls per iteration) ---------------------------------

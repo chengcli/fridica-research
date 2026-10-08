@@ -29,6 +29,7 @@ from typing import Callable
 
 from .config import Config
 from .machine import State
+from . import provenance
 from .roles import roles_table, holders
 
 log = logging.getLogger("fridica_research.board")
@@ -209,7 +210,7 @@ class Projects:
 def stage_table(state: State) -> str:
     rows = ["| Stage | Start | Projected | End | Actual |", "|---|---|---|---|---|"]
     for r in state.stage_log: rows.append(f"| {r['stage']} | {_hm(r['start'])} | {_dur(r['projected'])} | {_hm(r['end'])} | {_dur(r['actual'])} |")
-    return "\n".join([f"Thread: {state.thread}", f"Generation {state.generation}, iteration {state.iteration}. Projected {state.projected_hours:g} h.", "", *rows])
+    return "\n".join([f"Thread: {state.thread}", f"Generation {state.generation}, iteration {state.iteration}. Projected {state.projected_hours:g} h.", *provenance.lines(state.producer, state.subject, state.target, state.generation), "", *rows])
 
 
 def _hm(ts): return dt.datetime.fromtimestamp(ts, dt.timezone.utc).strftime("%Y-%m-%d %H:%M") if ts else ""

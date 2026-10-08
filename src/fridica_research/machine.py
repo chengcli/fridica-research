@@ -22,9 +22,9 @@ import copy
 import hashlib
 import re
 import datetime as dt
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass, field, fields
 
-from . import briefs, contracts
+from . import briefs, contracts, provenance
 from .roles import default_lenses
 from .config import Config
 
@@ -66,6 +66,10 @@ class State:
     channel: str
     problem: str
     generation: int = 1
+    producer: dict | None = None
+    subject: dict | None = None
+    target: dict | None = None
+    bootstrap: dict = field(default_factory=provenance.policy)
     lineage: str = ""  # origin thread id
     spawner: bool = True  # only the origin root's owner posts follow-ons
     iteration: int = 1
@@ -120,7 +124,10 @@ class State:
     def to_dict(self) -> dict: return asdict(self)
     @classmethod
     def from_dict(cls, d: dict) -> "State":
-        state = cls(**copy.deepcopy(d))
+        names = {f.name for f in fields(cls)}
+        unknown = sorted(set(d) - names)
+        state = cls(**copy.deepcopy({k: v for k, v in d.items() if k in names}))
+        if unknown: state.findings.append("Ignored unknown State keys: " + ", ".join(unknown))
         # Pre-iteration evidence snapshots already carry iteration in their action ref.
         pattern = re.escape(state.thread) + r"/g[1-9]\d*/i([1-9]\d*)/Debate/a[1-9]\d*/(?:r\d+/)?evidence-\d+-[^/]+"
         for entry in state.evidence:
@@ -152,7 +159,10 @@ class M:
 
     def lanes(self): return sorted(self.s.lenses)
 
-    def emit(self, kind: str, id_: str, **data): self.out.append(Action(kind, id_, data))
+    def emit(self, kind: str, id_: str, **data):
+        s = self.s
+        metadata = {k: copy.deepcopy(getattr(s, k)) for k in ("generation", "producer", "subject", "target", "bootstrap")}
+        self.out.append(Action(kind, id_, metadata | data))
 
     def arm(self, suffix: str, seconds: float):
         tid = self.aid(suffix)
@@ -389,6 +399,7 @@ class M:
     def next_iteration(self, note: str):
         s = self.s
         s.findings.append(note)
+        s.target = None
         self.cancel_all()
         if s.iteration < self.cfg.max_iterations:
             s.iteration, s.round, s.claim, s.approaches, s.reports, s.synthesis = s.iteration + 1, 0, None, [], {}, {}
@@ -408,6 +419,7 @@ class M:
     def run(self):
         s, ev = self.s, self.ev
         k = ev.kind
+        if "producer" in ev.data: s.producer = provenance.identity(ev["producer"])
         if k == "owner_stop":
             if s.stage not in TERMINAL: self.halt("Stopped", "stopped by the owner")
             return
@@ -592,7 +604,7 @@ class M:
         actual = (self.ev.now - s.started_at) / 3600
         lines_ = [f"approach: {(s.claim or {}).get('slug', 'none')}", f"pr: {s.implementer.get('pr') or 'none'}", f"sha: {s.implementer.get('sha') or 'none'}", f"audit: {s.audit.get('verdict', 'none')}" + (f" (sign-offs missing: {', '.join(s.audit['signoffs_missing'])})" if s.audit.get("signoffs_missing") else ""), f"projected: {s.projected_hours:g} h, actual: {actual:.2f} h", "| Stage | Projected | Actual |", "|---|---|---|", *rows]
         if s.redacted: lines_.append("details: withheld by the egress gate; see the fridica files for this thread")
-        text = contracts.format_result(s.iteration, d.get("summary", ""), lines_, self.aid("result"), s.partial)
+        text = contracts.format_result(s.iteration, d.get("summary", ""), lines_ + provenance.lines(s.producer, s.subject, s.target, s.generation), self.aid("result"), s.partial)
         self.post("result", "study_result", text, None if s.redacted else d.get("details"))
 
     def job_result(self, ev: Event):
@@ -715,6 +727,8 @@ class M:
         r = job["result"]
         ms = r.get("machine_state") or {}
         pr = next((a for a in (r.get("artifacts") or []) if isinstance(a, str) and "/pull/" in a), "")
+        repo = contracts.pr_id(pr)[0] or (s.subject or {}).get("repo")
+        s.target = provenance.identity({"repo": repo, "sha": ms.get("commit"), "tree": ms.get("tree")}) if r.get("status") in ("done", "partial") and ms.get("dirty") is False else None
         s.implementer = {"summary": r.get("summary", ""), "machine_state": ms, "pr": pr, "sha": str(ms.get("commit") or ""), "status": r.get("status")}
         if r.get("status") in ("done", "partial"):
             self.cancel_all()
@@ -766,7 +780,7 @@ class M:
         elif kind == "study_result" and s.stage == "Deliver":
             s.waiting = None
             if self.cfg.auto_followon and s.spawner and s.generation < self.cfg.max_generations and s.deliverable.get("next_problem"):
-                text = contracts.format_root(s.deliverable["next_problem"], s.generation + 1, s.lineage or s.thread, s.projected_hours, self.aid("root"))
+                text = contracts.format_root(s.deliverable["next_problem"], s.generation + 1, s.lineage or s.thread, s.projected_hours, self.aid("root"), producer=s.producer, subject=s.target or s.subject, bootstrap=s.bootstrap)
                 self.post("root", "study_root", text)
             else: self.finish()
         elif kind == "study_root" and s.stage == "Deliver":
@@ -860,9 +874,11 @@ def ts_key(ts: str) -> tuple[int, int]:
     return int(sec), int((frac or "0")[:6].ljust(6, "0"))
 
 
-def start(thread: str, channel: str, problem: str, now: float, *, generation: int = 1, lineage: str = "", spawner: bool = True, projected_hours: float, cfg: Config) -> tuple[State, list[Action]]:
+def start(thread: str, channel: str, problem: str, now: float, *, generation: int = 1, lineage: str = "", spawner: bool = True, projected_hours: float, cfg: Config, producer: dict | None = None, subject: dict | None = None, bootstrap: dict | None = None) -> tuple[State, list[Action]]:
     """The `started` event for a thread with no state: a fresh State entering Explore."""
     s = State(thread, channel, problem, generation=generation, lineage=lineage or thread, spawner=spawner, started_at=now, projected_hours=projected_hours)
+    s.producer, s.subject = provenance.identity(producer), provenance.identity(subject)
+    if bootstrap is not None: s.bootstrap = provenance.policy(bootstrap)
     m = M(s, Event("started", now), cfg)
     m.emit("set_driver", m.aid("driver"), thread=thread, driver="external")
     m.s.stage_log.append(m.row("Explore"))

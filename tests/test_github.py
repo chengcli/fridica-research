@@ -815,3 +815,14 @@ def test_round5_b_reviews_of_one_login_in_one_poll_each_keep_their_mirror_line_o
     assert [k for k, _ in out.posts] == ["review-5", "review-6"] and [e.data["verdict"] for e in out.events if e.kind == "sign_off"] == ["changes"]
     assert [f.rsplit(": ", 1)[1] for f in w.state.findings if "by stranger" in f] == ["one", "two"]
     assert not gh.argv("gh", "pr", "merge")
+
+
+def test_merge_policy_has_no_conflicting_human_decision_rule():
+    import re
+    from pathlib import Path
+
+    forbidden = r"\bhuman\s+(?:maintainer\s+)?(?:decides\s+(?:whether|when|if)\s+to\s+merge|maintainer'?s?\s+merge\s+decision)"
+    root = Path(__file__).parents[1]
+    for path in ("docs/protocol.md", "src/fridica_research/roles/auditor.md"):
+        match = re.search(forbidden, (root / path).read_text(), re.I)
+        assert match is None, f"{path}: {match.group()}"

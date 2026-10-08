@@ -22,7 +22,7 @@ TWO_PEERS = dataclasses.replace(CFG, reviewers=(Reviewer(REV, "scope"), Reviewer
 CLAIM_ALPHA = "Claim (iteration 1): x\napproach: alpha\nwhy: w\nalso considered: none"
 
 
-def finish_study(w: World, positions=(("agree", "agree"),)):
+def finish_study(w: World, positions=(("agree", "agree"),), impl=None):
     """From Explore (after a start or an iteration rollover) to Delivered with a local auditor pass."""
     w.finish("explorer", result(report=EXPLORER_REPORT))
     w.tick(w.cfg.settle_window)
@@ -31,7 +31,7 @@ def finish_study(w: World, positions=(("agree", "agree"),)):
         w.finish("physicist", result(report=report(position=pp)))
         if w.state.stage != "Debate" or w.state.phase != "job": break
     if w.state.stage == "DesignAudit": w.finish("auditor", result(report=report(verdict="pass")))
-    w.finish("implementer", result(artifacts=[PR]))
+    w.finish("implementer", impl if impl is not None else result(artifacts=[PR]))
     if "auditor" in w.pending: w.finish("auditor", result(report=report(verdict="pass")))
 
 
@@ -173,16 +173,26 @@ def final_round_evidence():
     return w
 
 
+def provenance_revisions():
+    w = World()
+    w.start(producer={"repo": "o/driver", "sha": "a" * 40, "tree": "b" * 40},
+            subject={"repo": "o/r", "sha": "c" * 40, "tree": "d" * 40})
+    finish_study(w, impl=result(artifacts=[PR], machine_state={"commit": "e" * 40, "tree": "f" * 40, "base": "c" * 40, "dirty": False}))
+    return w
+
+
 SCENARIOS = {
     "000_bootstrap": bootstrap, "001_simple_research": simple_research, "002_debate_disagreement": debate_disagreement, "003_auditor_return": auditor_return,
     "004_worker_failure": worker_failure, "005_timeout_retry": timeout_retry, "006_peer_claim_conflict": peer_claim_conflict, "007_partial_delivery": partial_delivery,
-    "008_changes_then_timeout": changes_then_timeout, "009_refused_reviewer": refused_reviewer, "010_refused_reviewer_retry": refused_reviewer_retry, "011_debate_adds_lens": debate_adds_lens, "012_final_round_evidence": final_round_evidence,
+    "008_changes_then_timeout": changes_then_timeout, "009_refused_reviewer": refused_reviewer, "010_refused_reviewer_retry": refused_reviewer_retry, "011_debate_adds_lens": debate_adds_lens, "012_final_round_evidence": final_round_evidence, "013_provenance_revisions": provenance_revisions,
 }
 
 
 def start_of(w: World) -> dict:
     s = w.state
-    return {"thread": s.thread, "channel": s.channel, "problem": s.problem, "now": s.started_at, "projected_hours": s.projected_hours, "generation": s.generation, "lineage": s.lineage, "spawner": s.spawner}
+    start = {"thread": s.thread, "channel": s.channel, "problem": s.problem, "now": s.started_at, "projected_hours": s.projected_hours, "generation": s.generation, "lineage": s.lineage, "spawner": s.spawner}
+    if s.producer or s.subject: start.update(producer=s.producer, subject=s.subject, bootstrap=s.bootstrap)
+    return start
 
 
 def record(name: str, root: Path = ROOT) -> Path:

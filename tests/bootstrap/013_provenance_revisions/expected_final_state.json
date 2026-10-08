@@ -78,12 +78,13 @@
  "group": null,
  "implementer": {
   "machine_state": {
-   "branch": "b",
-   "commit": "abc1234",
-   "dirty": false
+   "base": "cccccccccccccccccccccccccccccccccccccccc",
+   "commit": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+   "dirty": false,
+   "tree": "ffffffffffffffffffffffffffffffffffffffff"
   },
   "pr": "https://github.com/o/r/pull/9",
-  "sha": "abc1234",
+  "sha": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
   "status": "done",
   "summary": "sum"
  },
@@ -104,7 +105,11 @@
  "phase": "idle",
  "post_tries": 1,
  "problem": "Study the thing",
- "producer": null,
+ "producer": {
+  "repo": "o/driver",
+  "sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "tree": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+ },
  "projected_hours": 4.0,
  "redacted": false,
  "reports": {
@@ -203,7 +208,11 @@
   }
  ],
  "started_at": 1700000000.0,
- "subject": null,
+ "subject": {
+  "repo": "o/r",
+  "sha": "cccccccccccccccccccccccccccccccccccccccc",
+  "tree": "dddddddddddddddddddddddddddddddddddddddd"
+ },
  "synthesis": {
   "decisions": [
    "d1"
@@ -212,7 +221,11 @@
   "synthesis": "do alpha"
  },
  "synthesis_overrun": false,
- "target": null,
+ "target": {
+  "repo": "o/r",
+  "sha": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+  "tree": "ffffffffffffffffffffffffffffffffffffffff"
+ },
  "thread": "T1:C1:1700000000.000100",
  "timers": {},
  "waiting": null,

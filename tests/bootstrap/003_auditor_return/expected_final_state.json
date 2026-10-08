@@ -38,6 +38,13 @@
  },
  "audited_consensus": "## Consensus\ndo alpha\n\n### Decisions\n- d1\n\n### Open questions\n\nConsensus reference: T1:C1:1700000000.000100/g1/i2/Debate/a1/synth",
  "blocked_from": null,
+ "bootstrap": {
+  "parent_revision": null,
+  "require_child_boot": false,
+  "require_external_audit": true,
+  "require_replay": true,
+  "self_host": false
+ },
  "brief": {
   "brief": "map it",
   "questions": [
@@ -99,6 +106,7 @@
  "phase": "idle",
  "post_tries": 1,
  "problem": "Study the thing",
+ "producer": null,
  "projected_hours": 4.0,
  "redacted": false,
  "reports": {
@@ -265,6 +273,7 @@
   }
  ],
  "started_at": 1700000000.0,
+ "subject": null,
  "synthesis": {
   "decisions": [
    "d1"
@@ -273,6 +282,7 @@
   "synthesis": "do alpha"
  },
  "synthesis_overrun": false,
+ "target": null,
  "thread": "T1:C1:1700000000.000100",
  "timers": {},
  "waiting": null,

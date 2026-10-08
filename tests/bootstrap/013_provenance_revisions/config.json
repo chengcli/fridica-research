@@ -69,13 +69,30 @@
   "state_path": "~/.local/state/fridica-research/state.sqlite3"
  },
  "start": {
+  "bootstrap": {
+   "parent_revision": null,
+   "require_child_boot": false,
+   "require_external_audit": true,
+   "require_replay": true,
+   "self_host": false
+  },
   "channel": "C1",
   "generation": 1,
   "lineage": "T1:C1:1700000000.000100",
   "now": 1700000000.0,
   "problem": "Study the thing",
+  "producer": {
+   "repo": "o/driver",
+   "sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+   "tree": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+  },
   "projected_hours": 4.0,
   "spawner": true,
+  "subject": {
+   "repo": "o/r",
+   "sha": "cccccccccccccccccccccccccccccccccccccccc",
+   "tree": "dddddddddddddddddddddddddddddddddddddddd"
+  },
   "thread": "T1:C1:1700000000.000100"
  }
 }

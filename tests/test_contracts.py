@@ -87,3 +87,11 @@ def test_signoff_only_accepts_standalone_unquoted_canonical_lines():
                  valid.replace("SIGN-OFF", "sign-off"), valid.replace("abc1234", "ABC1234"),
                  valid.replace("approve", "Approve"), valid + " later"):
         assert c.parse_signoff(text) is None, text
+
+
+def test_repository_qualified_pr_requires_explicit_number_separator():
+    from fridica_research import machine
+    assert c.pr_id("o/r#9") == ("o/r", "9")
+    assert c.pr_id("#9") == ("", "9") and c.pr_id("9") == ("", "9")
+    assert c.pr_id("o/r9") == ("", "")
+    assert not machine.head_matches("o/r9", "abc1234", "https://github.com/o/r/pull/9", "abc1234")

@@ -259,7 +259,7 @@ def parse_signoff(text: str) -> SignOff | None:
 # -- GitHub pull requests (R21, R23, R24) ------------------------------------------
 MIRROR_MARK = "(GitHub review, mirrored)"
 _PR_URL = re.compile(r"https://github\.com/(?P<repo>[\w.-]+/[\w.-]+)/pull/(?P<n>\d+)")
-_PR_SHORT = re.compile(r"^(?:(?P<repo>[\w.-]+/[\w.-]+))?#?(?P<n>\d+)$")
+_PR_SHORT = re.compile(r"^(?:(?P<repo>[\w.-]+/[\w.-]+)#|#?)(?P<n>\d+)$")
 
 
 def pr_id(x: str) -> tuple[str, str]:

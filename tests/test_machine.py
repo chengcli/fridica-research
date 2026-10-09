@@ -420,7 +420,7 @@ def test_ts_key_is_fixed_width():
 def test_head_matches_table():
     assert machine.head_matches("https://github.com/o/r/pull/9", "abc1234", PR, SHA) and machine.head_matches("#9", "ABC1234", PR, SHA)
     assert not machine.head_matches(PR, "abc1235", PR, SHA) and not machine.head_matches("9", "", PR, SHA) and not machine.head_matches("8", SHA, PR, SHA)
-    assert machine.head_matches("anything", "fff", "", "")  # no reviewed head known: nothing to mismatch
+    assert not machine.head_matches("anything", "fff", "", "")
 
 
 def test_won_slug_is_not_treated_as_taken_later():
@@ -535,3 +535,13 @@ def test_round5_a_withdrawn_approval_reopens_only_an_approved_scope_on_the_revie
     for verdict in ("approve", "dismissed", "approve"): w.ev("sign_off", sender=REV, pr=PR, sha=SHA, verdict=verdict)
     w.ev("sign_off", sender="UREV2", pr=PR, sha=SHA, verdict="approve")
     assert w.state.stage == "Delivered" and w.state.audit["verdict"] == "pass"
+
+def test_signoff_cannot_close_scope_for_unknown_head_or_wrong_repository():
+    cfg = dataclasses.replace(CFG, require_signoffs=True)
+    for wrong_pr, reviewed_sha in (("https://github.com/other/r/pull/9", SHA), ("https://evil.example/github.com/o/r/pull/9", SHA), (PR, "")):
+        w = World(cfg=cfg)
+        w.to_audit()
+        w.state.implementer["sha"] = reviewed_sha
+        w.ev("sign_off", sender=REV, pr=wrong_pr, sha=SHA, verdict="approve")
+        assert w.state.audit_scopes["scope"]["signed_at"] is None
+        assert w.state.stage == "Audit"

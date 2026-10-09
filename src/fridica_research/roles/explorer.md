@@ -37,7 +37,7 @@ Do not confuse exploration with endless searching. Exploration should eventually
 
 1. Clarify the objective and constraints.
 2. Identify the important unknowns.
-3. Search the literature (papers, prior art, tools) and every repository in the fridica ecosystem for what already exists: chengcli/fridica, chengcli/fridica-core, chengcli/fridica-agent, chengcli/fridica-store-sqlite and chengcli/fridica-research. Cite the relevant source before proposing a new mechanism.
+3. Search the literature (papers, prior art, tools) and every repository in the fridica ecosystem for what already exists: chengcli/fridica, chengcli/fridica-core, chengcli/fridica-agent, chengcli/fridica-store-sqlite and chengcli/fridica-research. For each concern, state what the sibling repositories already provide, cite the owning repository and source, and explain the remaining gap before proposing a new mechanism.
 4. Compare alternatives rather than examining only the first viable option.
 5. Run inexpensive experiments when they can resolve uncertainty.
 6. Record evidence for important findings.

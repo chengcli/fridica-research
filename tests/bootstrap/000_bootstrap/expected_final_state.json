@@ -42,6 +42,13 @@
  },
  "audited_consensus": "## Consensus\ndo alpha\n\n### Decisions\n- d1\n\n### Open questions\n\nConsensus reference: TJ6E2EJ2K:C0C2D3PCW20:1791125606.982449/g1/i1/Debate/a1/synth",
  "blocked_from": null,
+ "bootstrap": {
+  "parent_revision": null,
+  "require_child_boot": false,
+  "require_external_audit": true,
+  "require_replay": true,
+  "self_host": false
+ },
  "brief": {
   "brief": "map it",
   "questions": [
@@ -101,6 +108,7 @@
  "phase": "idle",
  "post_tries": 1,
  "problem": "Bootstrap: implement fridica-research (fridica #126)",
+ "producer": null,
  "projected_hours": 4.0,
  "redacted": false,
  "reports": {
@@ -209,6 +217,7 @@
   }
  ],
  "started_at": 1791125606.0,
+ "subject": null,
  "synthesis": {
   "decisions": [
    "d1"
@@ -217,6 +226,7 @@
   "synthesis": "do alpha"
  },
  "synthesis_overrun": false,
+ "target": null,
  "thread": "TJ6E2EJ2K:C0C2D3PCW20:1791125606.982449",
  "timers": {},
  "waiting": null,

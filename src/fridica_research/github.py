@@ -37,7 +37,7 @@ from .roles import roles_table
 from . import contracts
 from .board import M_ADD_ITEM, Projects, Runner, subprocess_runner
 from .config import Config
-from .machine import Event, State
+from .machine import ORDER, Event, State
 
 log = logging.getLogger("fridica_research.github")
 PR_FIELDS = "headRefOid,state,mergedAt,mergeCommit,author,milestone,isDraft"  # the PR's own fields; reviews come from REST (`reviews`)
@@ -252,9 +252,10 @@ class GitHub:
         out = Poll()
         pr = state.implementer.get("pr", "")
         repo, n = contracts.pr_id(pr)
-        if not (self.g.enabled and repo and state.stage in POLLED_STAGES): return out
+        if not (self.g.enabled and repo): return out
         key = f"github:pr:{state.thread}:{repo}#{n}"
         t = json.loads(self.recall(key) or "{}")
+        if not (state.stage in POLLED_STAGES or (t.get("merged_at") and state.stage in ORDER)): return out  # a merged PR stays polled when a late review reopened its study
         if t.get("done") or now < t.get("last_poll", 0) + self.g.poll_interval: return out
         t["last_poll"] = now
         seen = t.setdefault("seen", [])
@@ -351,7 +352,7 @@ class GitHub:
                 events.append(Event("finding", now, {"text": f"GitHub review by {login} on {repo}#{n} at {head[:12]} ({kind}): no Slack id maps to {login}, so no audit card closes on it; map it in [people]"}))
             if kind == "CHANGES_REQUESTED" and after:
                 acked = self.acknowledge(pr, login, r, t, out, now)
-                if acked is None:  # B1: the reply failed; the review stays unseen and is acknowledged on the next poll
+                if acked is None:  # B1: the reply failed; the review stays unseen and is acknowledged on a later poll
                     out.retry = True
                     continue
                 events += acked
@@ -360,23 +361,31 @@ class GitHub:
     def acknowledge(self, pr: str, login: str, r: dict, t: dict, out: Poll, now: float) -> list[Event] | None:
         """R24: a changes-requested review after the merge: one reply on the PR, one thread line, findings, carried into the next PR.
 
-        None when the reply failed: nothing else is produced, and the next poll tries the reply again (each effect once)."""
+        None when the reply failed or waits for its backoff: nothing else is produced, and a later poll tries the reply again
+        (each effect once). The reply is tried `ack_tries` times, `ack_backoff` doubling between tries; then it is a finding
+        and the rest of the acknowledgement goes ahead without it. State is kept per (PR, reviewer, review id) in `acks`."""
         repo, n = contracts.pr_id(pr)
         rid = r["id"]
-        if rid not in t.setdefault("acked", []):
-            try:
-                self.comment(pr, f"@{login} {ACK}.")
-                t["acked"].append(rid)
-            except Exception as e:  # noqa: BLE001 - retried on the next poll
-                log.warning("acknowledgement on %s failed: %s", pr, e)
-                return None
-        if f"post:ack-{rid}" not in t["seen"]: out.items.append(Item(f"post:ack-{rid}", posts=[(f"ack-{rid}", f"{ACK}: post-merge review by {login} on {repo}#{n}")]))
         items = review_items(r["body"])
-        if rid not in t.setdefault("carried", []):
+        if rid not in t.setdefault("carried", []):  # before the reply, so a retried reply keeps its items in the order the reviews were submitted
             carry = self.carried(repo)
             carry[login] = [*carry.get(login, []), *items]
             self.remember(f"github:carry:{repo.lower()}", json.dumps(carry, sort_keys=True))
             t["carried"].append(rid)
+        a = t.setdefault("acks", {}).setdefault(f"{login.lower()}:{rid}", {"tries": 0, "next": 0})
+        if rid not in t.setdefault("acked", []) and a["tries"] < self.g.ack_tries:
+            if now < a["next"]: return None
+            try:
+                self.comment(pr, f"@{login} {ACK}.")
+                t["acked"].append(rid)
+            except Exception as e:  # noqa: BLE001 - retried after the backoff, up to ack_tries
+                a["tries"] += 1
+                log.warning("acknowledgement on %s failed (%d of %d): %s", pr, a["tries"], self.g.ack_tries, e)
+                if a["tries"] < self.g.ack_tries:
+                    a["next"] = now + self.g.ack_backoff * 2 ** (a["tries"] - 1)
+                    return None
+        if rid not in t["acked"] and f"ack-failed:{rid}" not in t["seen"]: out.items.append(Item(f"ack-failed:{rid}", events=[Event("finding", now, {"text": f"the reply to the post-merge review by {login} on {repo}#{n} failed {a['tries']} times and is not retried; reply on the PR by hand"})]))
+        if f"post:ack-{rid}" not in t["seen"]: out.items.append(Item(f"post:ack-{rid}", posts=[(f"ack-{rid}", f"{ACK}: post-merge review by {login} on {repo}#{n}")]))
         return [Event("finding", now, {"text": f"post-merge review by {login} on {repo}#{n}: {item}"}) for item in items]
 
     def withdrawals(self, pr: str, state: State, v: dict, rs: list[dict], t: dict, out: Poll, now: float):

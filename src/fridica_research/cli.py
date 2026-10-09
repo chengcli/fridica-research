@@ -5,8 +5,9 @@ import argparse
 import json
 import logging
 import sys
+from dataclasses import asdict
 
-from . import config, contracts
+from . import config, contracts, provenance
 from .board import Board, role_totals
 from .client import Client, read_capability
 from .driver import Driver, claude_runner
@@ -24,7 +25,12 @@ def build_client(cfg: config.Config) -> Client:
 def cmd_start(cfg: config.Config, args) -> int:
     hours = args.projected_hours if args.projected_hours is not None else cfg.default_projected_hours
     ref = f"start/{args.channel}/g1"
-    text = contracts.format_root(args.text, 1, None, hours, ref, tuple(r.handle for r in cfg.reviewers))
+    subject = provenance.revision(args.repo, args.revision) if args.repo else None
+    if args.repo and subject is None:
+        print("input repository revision is unavailable", file=sys.stderr)
+        return 1
+    text = contracts.format_root(args.text, 1, None, hours, ref, tuple(r.handle for r in cfg.reviewers),
+                                 producer=provenance.running_revision(), subject=subject, bootstrap=asdict(provenance.BootstrapPolicy()))
     client = build_client(cfg)
     r = client.post_root(args.channel, contracts.PostRequest("study_root", text))
     if args.issue is not None:
@@ -102,6 +108,8 @@ def parser() -> argparse.ArgumentParser:
     s = sub.add_parser("start", help="post a study root in a research channel")
     s.add_argument("channel")
     s.add_argument("text")
+    s.add_argument("--repo", help="local Git checkout of the study input (no fetch)")
+    s.add_argument("--revision", default="HEAD", help="input revision in that checkout")
     s.add_argument("--projected-hours", type=float, default=None)
     s.add_argument("--issue", type=int, default=None, help="attach an existing GitHub issue as the study card")
     ls = sub.add_parser("list", help="list studies and their stages")

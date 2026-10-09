@@ -14,7 +14,10 @@ so every correlation datum the driver needs travels as a readable text line:
 from __future__ import annotations
 
 import re
+import json
 from dataclasses import dataclass, field
+
+from . import provenance
 
 POST_KINDS = ("study_claim", "study_result", "study_root", "report")
 BODY_LIMIT = 64 * 1024  # control request body cap (fridica src/control/mod.rs)
@@ -138,10 +141,12 @@ def parse_claim(text: str) -> Claim | None:
     return Claim(int(head.group("i")), slug, head.group("title").strip(), kv.get("why", ""), also)
 
 
-def format_root(text: str, generation: int, lineage: str | None, projected_hours: float, ref: str, mentions: tuple[str, ...] = ()) -> str:
+def format_root(text: str, generation: int, lineage: str | None, projected_hours: float, ref: str, mentions: tuple[str, ...] = (), *, producer: dict | None = None, subject: dict | None = None, bootstrap: dict | None = None) -> str:
     """The `study_root` text (R4): projection, generation and lineage lines; `lineage` is None for an origin root."""
     head = (" ".join(f"<@{m}>" for m in mentions) + "\n") if mentions else ""
     tail = [f"projected: {projected_hours:g} h", f"generation: {generation}", f"lineage: {lineage or 'origin'}", f"ref: {ref}"]
+    tail += [line for line in provenance.lines(producer, subject, None, generation) if not line.startswith("generation:")]
+    if bootstrap is not None: tail.append("bootstrap: " + json.dumps(bootstrap, sort_keys=True, separators=(",", ":")))
     return head + text.rstrip() + "\n\n" + "\n".join(tail)
 
 
@@ -151,6 +156,8 @@ class Root:
     generation: int | None
     lineage: str | None
     projected_hours: float | None
+    subject: dict | None = None
+    bootstrap: dict | None = None
 
 
 def parse_root(text: str) -> Root:
@@ -160,7 +167,12 @@ def parse_root(text: str) -> Root:
     if lineage == "origin": lineage = None
     m = re.match(r"^\s*([0-9.]+)\s*h", kv.get("projected", ""))
     body = re.split(r"\n\n(?=projected: )", text, maxsplit=1)[0]
-    return Root(body, gen, lineage, float(m.group(1)) if m else None)
+    def record(key):
+        try:
+            value = json.loads(kv.get(key, "null"))
+            return value if isinstance(value, dict) else None
+        except (ValueError, TypeError): return None
+    return Root(body, gen, lineage, float(m.group(1)) if m else None, provenance.identity(record("subject")), provenance.policy(record("bootstrap")) if record("bootstrap") is not None else None)
 
 
 def format_result(iteration: int, summary: str, lines_: list[str], ref: str, partial: bool = False) -> str:
@@ -205,7 +217,7 @@ class Approach:
     why: str = ""
 
 
-_APPROACH = re.compile(r"^\s*[-*]\s*(?P<slug>[a-z0-9][a-z0-9-]{0,47})\s*:\s*(?P<title>[^—]+?)(?:\s*(?:—|--)\s*(?P<why>.*))?\s*$", re.M)
+_APPROACH = re.compile(r"^\s*[-*]\s*(?P<wrap>`|\*\*)?(?P<slug>[a-z0-9][a-z0-9-]{0,47})(?(wrap)(?P=wrap))\s*:\s*(?P<title>[^—]+?)(?:\s*(?:—|--)\s*(?P<why>.*))?\s*$", re.M)
 
 
 def parse_approaches(report: str) -> list[Approach]:
@@ -220,7 +232,7 @@ def parse_approaches(report: str) -> list[Approach]:
     return out
 
 
-_SIGNOFF = re.compile(r"SIGN-OFF\s+(?P<pr>\S+)\s+(?P<sha>[0-9a-f]{7,40})\s+(?P<verdict>approve|changes)\b", re.I)
+_SIGNOFF = re.compile(r"SIGN-OFF[ \t]+(?P<pr><[^<>\r\n]+>|\S+)[ \t]+(?P<sha>[0-9a-f]{7,40})[ \t]+(?P<verdict>approve|changes)(?: \(code review\))?[ \t]*")
 
 
 @dataclass(frozen=True)
@@ -232,28 +244,39 @@ class SignOff:
 
 def parse_signoff(text: str) -> SignOff | None:
     if MIRROR_MARK in text: return None  # the driver's mirror of a GitHub review is the record, never a sign-off (R21)
-    m = _SIGNOFF.search(text)
-    return SignOff(m.group("pr"), m.group("sha"), m.group("verdict").lower()) if m else None
+    fence = ""
+    for line in text.splitlines():
+        marker = re.match(r"^\s*(`{3,}|~{3,})", line)
+        if marker:
+            if not fence: fence = marker.group(1)
+            elif marker.group(1)[0] == fence[0] and len(marker.group(1)) >= len(fence) and not line[marker.end():].strip(): fence = ""
+            continue
+        m = _SIGNOFF.fullmatch(line) if not fence else None
+        if m: return SignOff(m.group("pr"), m.group("sha"), m.group("verdict"))
+    return None
 
 
 # -- GitHub pull requests (R21, R23, R24) ------------------------------------------
 MIRROR_MARK = "(GitHub review, mirrored)"
-_PR_URL = re.compile(r"github\.com/(?P<repo>[^/\s]+/[^/\s]+)/pull/(?P<n>\d+)")
-_PR_SHORT = re.compile(r"^(?:(?P<repo>[\w.-]+/[\w.-]+))?#?(?P<n>\d+)$")
+_PR_URL = re.compile(r"https://github\.com/(?P<repo>[\w.-]+/[\w.-]+)/pull/(?P<n>\d+)")
+_PR_SHORT = re.compile(r"^(?:(?P<repo>[\w.-]+/[\w.-]+)#|#?)(?P<n>\d+)$")
 
 
 def pr_id(x: str) -> tuple[str, str]:
     """`(owner/repo, number)` of a PR named as a URL, `owner/repo#N`, `#N` or `N`; the repo is "" when the name does not carry it."""
-    x = str(x).strip().rstrip("/")
-    m = _PR_URL.search(x) or _PR_SHORT.match(x)
-    if not m: return "", x.rsplit("/", 1)[-1].lstrip("#")
+    x = str(x).strip()
+    wrapped = re.fullmatch(r"<(https://github\.com/[^<>|\s]+)(?:\|[^<>\r\n]+)?>", x)
+    if wrapped: x = wrapped.group(1)
+    x = x.rstrip("/")
+    m = _PR_URL.fullmatch(x) or _PR_SHORT.fullmatch(x)
+    if not m: return "", ""
     return (m.group("repo") or "").lower(), m.group("n")
 
 
 def same_pr(a: str, b: str) -> bool:
     """Two PR names denote the same PR: equal numbers, and equal repositories whenever both names carry one (two #12 in two repos differ)."""
     (ra, na), (rb, nb) = pr_id(a), pr_id(b)
-    return na == nb and (not ra or not rb or ra == rb)
+    return bool(na and nb) and na == nb and (not ra or not rb or ra == rb)
 
 
 def mirror_line(login: str, review_state: str, pr: str, sha: str, after_merge: bool = False) -> str:

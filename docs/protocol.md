@@ -14,9 +14,14 @@ Each participant holds one persistent role for that PR (explorer, debater, imple
 auditor), and assignments may rotate between PRs. The explorer reports what exists and what is
 missing. Work outside any role's jurisdiction goes into the PR root thread as input for the
 assigned role. The first-pass implementer owns revisions and is the only role that commits
-code. Exactly one reviewer is assigned to the PR: its
-auditor. Only that auditor submits a GitHub review, bound to the current head. The auditor's
-technical approval precedes a human maintainer's merge decision.
+code. The PR's role-assigning owner is the person who assigns its persistent roles and may
+reassign a stalled auditor. Exactly one reviewer is assigned to the PR: its auditor. Only that
+auditor submits a GitHub review, bound to the current head. The driver merges only after that
+auditor approves the current head and required branch checks pass.
+
+If the auditor misses a stated ETA, the role-assigning owner reassigns the review or escalates
+to study owner chengcli. An unresolved blocker or unavailable approval leaves the PR unmerged;
+neither timeout nor escalation waives the auditor's current-head approval.
 
 Debate covers at least two distinct lenses, followed by a summary of their agreement,
 disagreement and surviving evidence in the PR discussion. Record gaps and follow-ups as
@@ -71,7 +76,9 @@ this assumes the host's default four-worker limit: three lanes plus the implemen
 
 At most one evidence job is issued per (iteration, design_returns, round). It receives only the lens's
 request; the answer is posted to the thread and enters the next debate brief only within
-the same iteration. Evidence from earlier iterations remains historical state. When loading
+the same iteration. Synthesis also consumes answered evidence from the current iteration,
+including answers received in the final debate round, without starting an extra round.
+Evidence from earlier iterations remains historical state. When loading
 older snapshots without an evidence iteration, recover it from the canonical action reference;
 entries without a recognizable reference are retained but neither rendered nor counted
 against the request limit. No database migration is needed. Its deadline
@@ -82,6 +89,13 @@ an answer stops unfinished jobs and synthesizes with retained reports; that synt
 five minutes, then moves to the next iteration with the overrun finding if unfinished.
 Other debate overruns preserve partial summaries as findings and advance the iteration.
 
+
+`machine.step(state, event, config) -> (state, actions)` is pure; the driver persists the state
+after every step (`store.py`, one SQLite transaction) and executes the actions (`driver.py`).
+Blocked (owner-resumable) and Stopped are the two ways out of the loop. Every outcome of
+executing an action comes back as an event (`delegated`, `delegate_refused`, `llm_result`,
+`post_refused`), so the snapshot in the store is always the fold of `step` over the events
+(`tests/test_rebuild.py`).
 
 ## R1. Stage posts in the study thread
 
@@ -161,15 +175,18 @@ Debate converges when all active lenses agree or `max_debate_rounds` is reached.
 workers are the implementer plus sorted active lens lanes; dropped lanes are stopped.
 A missing or invalid stance counts as disagree. With zero rounds, synthesis starts directly.
 
-## R6. Audit by peers
+## R6. Study-stage audit by peers
+
+This section describes the current study loop's scoped peer sign-offs, not the PR review gate
+above. Peer sign-offs do not replace the PR's single assigned auditor or GitHub approval.
 
 Entering Audit posts the PR link and exact head SHA (from the implementer's `machine_state` and
 artifacts), @-mentions the `[audit] reviewers` with their scope, states the sign-off line format,
 and delegates the auditor worker (ephemeral, `auditor_backend`, default `other`) only for the
-scopes no peer takes (R13). Human replies containing `SIGN-OFF <pr> <sha> approve|changes` from
+scopes no peer takes (R13). Standalone, unquoted lines `SIGN-OFF <pr> <sha> approve|changes` from
 a configured reviewer are recorded on every scope that reviewer takes, and only when the line
 names the reviewed head: the PR of the audit request (as a URL, `#N` or `N`) and a prefix of its
-sha (`machine.head_matches`; with no PR or sha known there is nothing to check). A sign-off for another PR or sha is ignored and noted as a finding
+sha (`machine.head_matches`; an unknown PR or head never counts). A sign-off for another PR or sha is ignored and noted as a finding
 (`sign-off from <user> ignored: ... is not the reviewed head ...`), so a sign-off on a different
 head never closes a peer's card. With `require_signoffs = true`
 (default) the stage waits (after the local auditor's `pass`, if any) until every peer scope is
@@ -226,6 +243,9 @@ wait the overrun delivers with the missing sign-offs listed. Claim and Deliver h
 and are bounded by the stage timer only.
 
 ## R13. Plain issues, one owner per card, no duplicated responsibility
+
+The audit cards below track the current study-stage scopes described in R6. They do not create
+additional PR reviewers or satisfy the single-auditor PR gate.
 
 Stage cards are plain issues in the study repository whose body starts with `Study: #N`;
 there is no sub-issue hierarchy. Every card has exactly one assignee, the single authority for
@@ -356,10 +376,18 @@ other reviewers when its PR merges, and their reviews keep closing their cards.
 
 Only the PR's assigned auditor is requested on a PR; the merge gate is that auditor's approval on the
 current head (bots such as copilot, the PR's author and every other account never count). A merged PR stays polled
-for `post_merge_window` (default 7 days) after `mergedAt`. A `CHANGES_REQUESTED` review by a configured
-reviewer submitted after the merge is acknowledged automatically (once: the reply, the carry and the
-thread line are each recorded as done; a review is marked seen only once the reply succeeded, so a
-failed reply is tried again on the next poll): one reply on the PR (`@<login> acknowledged, goes
+for `post_merge_window` (default 7 days) after `mergedAt`, also after a late `changes` reopened its study
+from Deliver (in every stage but Blocked and Stopped, while that PR is still the study's). A `CHANGES_REQUESTED` review by the PR's assigned
+auditor submitted after the merge is acknowledged automatically (once: the reply, the carry and the
+thread line are each recorded as done; the items are carried before the reply is tried, so they keep the
+order the reviews were submitted in when a reply is retried; a review is marked seen only once the reply succeeded, so a
+failed reply is tried again on a later poll, at most `ack_tries` times (default 5) with `ack_backoff`
+(default 10 min) before the first retry, doubling after each failure; after the last failed try the reply
+is a finding (`the reply to the post-merge review by <login> on <repo>#<n> failed <k> times and is not
+retried; reply on the PR by hand`) and the rest of the acknowledgement goes ahead without it). The
+acknowledgement is keyed on (PR, reviewer, review id) (store meta `github:pr:...` `acks`): every post-merge
+review is its own, so a later verdict by the same reviewer never cancels one owed, and each review is
+acknowledged exactly once: one reply on the PR (`@<login> acknowledged, goes
 into the next PR.`), one line in the study thread (`acknowledged, goes into the next PR: post-merge
 review by <login> on <repo>#<n>`), one finding per item of the review body (each item cut at 500 characters)
 (`post-merge review by <login> on <repo>#<n>: <item>`), and the items are carried (store meta
@@ -368,6 +396,45 @@ review by <login> on <repo>#<n>`), one finding per item of the review body (each
 so an item added after that body was prepared goes into the following PR. The reviewer's audit
 card closes on their review whichever side of the merge it lands.
 
+## Repository provenance (R2)
+
+`producer` identifies the running driver's Git repository, full commit and tree.
+`subject` identifies the **input repository revision** examined by the study; it
+is not an in-toto output subject. `target` identifies the committed output revision
+and is null before a clean, committed implementer result exists. Missing identities
+stay null; abbreviated commits are not expanded by guessing. A dirty HEAD records
+`dirty: true`: its commit/tree identify the committed baseline, not uncommitted code.
+An installed package without Git metadata reports an unavailable producer.
+
+Use `start --repo <local-checkout> --revision <ref>` to resolve input metadata
+without fetching. Revisions travel in State, action records, root/delivery text and
+the study card. The driver records its own running revision, ignoring a root's
+producer claim; execution after restart records the new producer on subsequent
+events. Provenance fields are internal records, never extra host delegate fields.
+
+Generation remains `State.generation` and the existing `g<n>` action IDs. For a
+follow-on, `github:revision:<repo>:g<n>` remains the only merged-revision source:
+a recorded parent merge supplies the next subject commit and
+`bootstrap.parent_revision`. Until a tree is supplied, its tree is null.
+Without the immediate parent's merge record, `parent_revision` stays null.
+The existing key is not lineage-qualified: concurrent lineages for the same
+repository and generation can overwrite it. This bundle does not disambiguate them.
+No second generation counter or merge-revision store is introduced.
+
+`BootstrapPolicy` records `self_host`, `parent_revision`, `require_replay`,
+`require_external_audit` and `require_child_boot`. These are metadata, not proof
+that checks ran. External audit means the assigned auditor's approval on the
+current PR head under R23/R24, together with required GitHub checks; no distinct
+backend is required. Timeout and partial delivery never authorize merge.
+Self-host execution, policy-version gates, candidate creation, activation,
+re-exec, rollback and child health remain deferred to #29.
+
+Unknown State keys are ignored with one finding listing only their names. Snapshot
+loads preserve deep-copy isolation and the evidence-iteration migration.
+The R20 `levels.diff_level` utility classifies a clean candidate's changed paths,
+including both rename sides, with the highest matching level. It does not create
+or activate candidates.
+
 ## R25. Handover ledger
 
 What fridica-research does after each PR, and what the scaffold (R0) still does. Each PR adds its row.
@@ -375,6 +442,7 @@ What fridica-research does after each PR, and what the scaffold (R0) still does.
 | After | fridica-research does | scaffold still does |
 |---|---|---|
 | PR4 github | requests reviews, polls them, closes audit cards, merges fridica-research PRs | reads Slack, relays to the journal |
+| R2 bundle | provenance, clean diff classification, bounded GitHub acknowledgements, strict head binding and evidence replay | reads Slack and relays; self-host activation remains #29 |
 
 ## Failure handling
 
@@ -418,7 +486,10 @@ never cut. The final reference is rendered after shrinking. Oversized mandatory 
 the stage. Implementer input excludes Study, Approach, explorer text and other findings;
 auditor input excludes explorer text and implementer summaries.
 
-SIGN-OFF grammar changes are issue #33; R21 polling stays. Its existing host view prior art
+SIGN-OFF uses a case-sensitive standalone line with a lowercase 7–40 digit hex SHA;
+quoted, fenced, indented or prefixed templates do not count. The exact optional
+` (code review)` suffix is accepted. Repository-qualified names must match the full
+owner/repository identity; unqualified `#N` is bound to this study’s known PR. R21 polling stays. Its existing host view prior art
 is [fridica view.rs, lines 95–145](https://github.com/chengcli/fridica/blob/fefd4c3fe214f2a9d8bcd114e5238c3518696714/src/github/view.rs#L95-L145);
 this reference is guidance, not a runtime dependency. Host instructions support belongs to
 fridica #138; projection budget replacement belongs to #39. Issue 38 changes neither.

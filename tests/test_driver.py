@@ -95,7 +95,7 @@ def test_human_signoff_and_login_replies_are_translated(world):
     server.message(thread, "UHUMAN", "looks good to me")
     drain(drv)
     s = drv.store.load(thread)
-    assert s.signoffs == {REV: "approve"} and s.people == {REV: "reviewer-login"}
+    assert s.signoffs == {} and s.people == {REV: "reviewer-login"}
 
 
 def test_owner_stop_command_is_applied(world):
@@ -274,3 +274,136 @@ def test_design_return_restart_does_not_adopt_old_round_one_jobs(world):
     assert all("/r1/debate-1-" in j["action_id"] for j in recovered.group["jobs"].values())
     bodies = [body for _, route, body in server.requests if route.endswith("/delegate")]
     assert all("lens_sha256" not in b and "instructions" not in b for b in bodies)
+
+
+def test_provenance_uses_running_driver_and_existing_merged_revision(world, monkeypatch):
+    from fridica_research import contracts, provenance, machine
+    from dataclasses import asdict
+    producer = {"repo": "o/driver", "sha": "a" * 40, "tree": "b" * 40}
+    subject = {"repo": "o/input", "sha": "c" * 40, "tree": "d" * 40}
+    monkeypatch.setattr(provenance, "running_revision", lambda: producer)
+    server, cfg = world
+    drv = make_driver(cfg)
+    drv.store.set_meta("github:revision:o/input:g1", "e" * 40)
+    thread = "T1:C1:1700000000.000100"
+    text = contracts.format_root("Next study", 2, "parent", 2, "start",
+        producer=subject, subject=subject, bootstrap=asdict(provenance.BootstrapPolicy()))
+    server.root(thread, OWNER, text)
+    drain(drv)
+    state = drv.store.load(thread)
+    assert state.producer == producer
+    assert state.subject == {"repo": "o/input", "sha": "e" * 40, "tree": None}
+    assert state.bootstrap["parent_revision"] == "e" * 40
+    body = next(body for method, path, body in server.requests if path.endswith("/delegate"))
+    assert not ({"producer", "subject", "target", "bootstrap", "generation"} & body.keys())
+    changed = {**producer, "sha": "f" * 40}
+    drv.producer = changed
+    drv.apply(thread, machine.Event("finding", drv.clock(), {"text": "continued"}))
+    assert drv.store.load(thread).producer == changed
+
+
+@pytest.mark.parametrize("subject", [None, {"repo": "o/input", "sha": "e" * 40, "tree": None}])
+def test_missing_parent_merge_does_not_reuse_inherited_revision(world, subject):
+    from fridica_research import contracts
+    server, cfg = world
+    drv = make_driver(cfg)
+    drv.store.set_meta("github:revision:o/input:g1", "c" * 40)
+    thread = "T1:C1:1700000000.000100"
+    text = contracts.format_root("Third study", 3, "parent", 2, "start",
+        subject=subject, bootstrap={"self_host": True, "parent_revision": "c" * 40})
+    server.root(thread, OWNER, text)
+    drain(drv)
+    state = drv.store.load(thread)
+    assert state.subject == subject
+    assert state.bootstrap["parent_revision"] is None
+    assert state.bootstrap["self_host"] is True
+
+
+@pytest.mark.parametrize("text, accepted", [
+    ("SIGN-OFF https://github.com/o/r/pull/9 abc1234 approve", True),
+    ("SIGN-OFF <https://github.com/o/r/pull/9> abc1234 approve", True),
+    ("SIGN-OFF <https://github.com/o/r/pull/9|PR9> abc1234 approve", True),
+    ("SIGN-OFF <https://github.com/o/r/pull/9|Review PR 9> abc1234 approve", True),
+    ("SIGN-OFF o/r#9 abc1234 approve", True),
+    ("SIGN-OFF <https://github.com/other/r/pull/9> abc1234 approve", False),
+    ("SIGN-OFF <https://github.com/o/r/pull/10> abc1234 approve", False),
+    ("SIGN-OFF <https://github.com/o/r/pull/9> def5678 approve", False),
+    ("SIGN-OFF <https://github.com.evil/o/r/pull/9> abc1234 approve", False),
+    ("SIGN-OFF <https://github.com/o/r/pull/9/files> abc1234 approve", False),
+    ("SIGN-OFF <https://github.com/o/r/pull/9|PR9>suffix abc1234 approve", False),
+    ("SIGN-OFF <https://evil/o/r/pull/9|https://github.com/o/r/pull/9> abc1234 approve", False),
+    ("SIGN-OFF <https://github.com/o/r/pull/9 abc1234 approve", False),
+    ("SIGN-OFF <<https://github.com/o/r/pull/9>> abc1234 approve", False),
+    ("SIGN-OFF <o/r#9> abc1234 approve", False),
+    ("SIGN-OFF o/r9 abc1234 approve", False),
+    ("> SIGN-OFF <https://github.com/o/r/pull/9> abc1234 approve", False),
+    ("    SIGN-OFF <https://github.com/o/r/pull/9> abc1234 approve", False),
+    ("Example: SIGN-OFF <https://github.com/o/r/pull/9> abc1234 approve", False),
+    ("`SIGN-OFF <https://github.com/o/r/pull/9> abc1234 approve`", False),
+    ("```text\nSIGN-OFF <https://github.com/o/r/pull/9> abc1234 approve\n```", False),
+])
+def test_slack_signoff_gates_delivery_on_exact_reviewed_head(world, text, accepted):
+    from support import THREAD, World
+    server, cfg = world
+    cfg = dataclasses.replace(cfg, require_signoffs=True, audit_scopes=("scope",), max_generations=1)
+    w = World(cfg=cfg)
+    w.to_audit()
+    assert w.state.stage == "Audit" and w.state.phase == "signoff"
+    drv = make_driver(cfg)
+    drv.store.save(w.state)
+    server.message(THREAD, REV, text)
+    drain(drv)
+    state = drv.store.load(THREAD)
+    scope = state.audit_scopes["scope"]
+    assert (scope["signed_at"] is not None) == accepted
+    assert scope["verdict"] == ("approve" if accepted else None)
+    assert state.stage == ("Delivered" if accepted else "Audit")
+
+
+def test_restart_synthesis_preserves_final_round_current_iteration_evidence(world):
+    from support import THREAD, World
+    server, cfg = world
+    w = World(cfg=cfg)
+    w.to_debate()
+    request = "## Evidence request\nquestion: measure scaling\nsource: prior paper\nexperiment: run probe"
+    for lane in ("mathematician", "physicist"):
+        w.finish(lane, result(report=report(position="agree", body=request)))
+    w.finish("explorer", result(report="STALE_ITERATION_ONE_EVIDENCE"))
+    for lane in ("mathematician", "physicist"):
+        w.finish(lane, result(report=report(position="agree")))
+    w.finish("auditor", result(report=report(verdict="pass")))
+    w.finish("implementer", result(artifacts=["https://github.com/o/r/pull/9"]))
+    w.finish("auditor", result(report=report(verdict="return")))
+    assert w.state.iteration == 2
+    w.finish("explorer", result(report=EXPLORER_REPORT))
+    w.tick(cfg.settle_window)
+    for lane in ("mathematician", "physicist"):
+        w.finish(lane, result(report=report(position="disagree")))
+    assert w.state.round == cfg.max_debate_rounds
+    for lane in ("mathematician", "physicist"):
+        w.finish(lane, result(report=report(position="agree", body=request)))
+    assert w.state.phase == "evidence"
+    # Crash after the synthesis snapshot is saved, before its LLM action runs.
+    w.react = lambda actions: w.actions.extend(actions)
+    w.finish("explorer", result(report="CURRENT_ITERATION_TWO_FINAL_ROUND_EVIDENCE"))
+    assert w.state.phase == "llm" and w.state.waiting["id"].endswith("/synth")
+    normal_prompt = w.kinds("llm_call")[-1]["prompt"]
+    assert "CURRENT_ITERATION_TWO_FINAL_ROUND_EVIDENCE" in normal_prompt
+    assert "STALE_ITERATION_ONE_EVIDENCE" not in normal_prompt
+    store = Store(cfg.state_file)
+    store.save(w.state)
+    store.close()
+    calls = []
+    def llm(name, prompt):
+        calls.append((name, prompt))
+        return LLM[name]
+    restarted = make_driver(cfg, store=Store(cfg.state_file), llm=llm)
+    restarted.recover()
+    assert len(calls) == 1 and calls[0][0] == "study_synthesis"
+    recovered_prompt = calls[0][1]
+    assert "CURRENT_ITERATION_TWO_FINAL_ROUND_EVIDENCE" in recovered_prompt
+    assert "STALE_ITERATION_ONE_EVIDENCE" not in recovered_prompt
+    assert recovered_prompt == normal_prompt
+    state = restarted.store.load(THREAD)
+    assert state.stage == "DesignAudit" and state.iteration == 2
+    assert [entry["iteration"] for entry in state.evidence] == [1, 2]

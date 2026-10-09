@@ -22,6 +22,10 @@ CHARTERS = (
 )
 
 
+class BriefOverflow(ValueError):
+    """Mandatory brief content cannot fit the host cap; a stage may retry this failure."""
+
+
 def schema(name: str) -> dict:
     return json.loads(resources.files("fridica_research").joinpath(f"schemas/{name}.json").read_text())
 
@@ -44,7 +48,7 @@ def fit(sections: list[tuple[str, str]], findings: list[str], limit: int = contr
         text = render()
     while len(text) > limit:
         candidates = [(len(b), i) for i, (h, b) in enumerate(sections) if h not in protected and b]
-        if not candidates: raise ValueError("mandatory brief sections exceed the 40,000-character cap")
+        if not candidates: raise BriefOverflow("mandatory brief sections exceed the 40,000-character cap")
         _, i = max(candidates)
         h, body = sections[i]
         sections[i] = (h, body[:max(0, len(body) - (len(text) - limit))])
@@ -57,8 +61,8 @@ def explorer(ref: str, problem: str, brief: str, questions: list[str], findings:
     return fit([
         ("Role", instructions("explorer")), ("Study", problem), ("Brief", brief), ("Questions", "\n".join(f"- {q}" for q in questions)),
         ("Approaches already claimed by peers", peers),
-        ("Task", "Search literature and ecosystem prior art; propose sourced findings for debate, then viable approaches."),
-        ("Output format", "Include `## Findings for debate`, one line per finding: `- F<n>: <claim> -- source: <URL|DOI|repo@sha:path:line> -- test: <check>`. End the report with a `## Approaches` section: one line per viable approach, `- <slug>: <title> -- <why>`, slug `^[a-z0-9][a-z0-9-]{0,47}$`, most promising first."),
+        ("Task", "Search literature and ecosystem prior art. For each concern, state what sibling repositories already provide, cite the owner and source, and explain any gap before proposing sourced findings for debate and viable approaches."),
+        ("Output format", "Include `## Findings for debate`, one line per finding: `- F<n>: <claim> -- source: <URL|DOI|repo@sha:path:line> -- test: <check>`. End the report with a `## Approaches` section: one line per viable approach, `- <slug>: <title> -- <why>`, plain slug without backticks or bold markup matching `^[a-z0-9][a-z0-9-]{0,47}$`, most promising first."),
         ("Reference", f"ref: {ref}"),
     ], findings)
 
@@ -105,7 +109,7 @@ def audit_request(ref: str, iteration: int, pr: str, sha: str, reviewers: list[t
     """The R6 post: PR link, exact head SHA, reviewers with focus, and the SIGN-OFF line format."""
     who = "\n".join(f"<@{h}> ({f})" if f else f"<@{h}>" for h, f in reviewers) or "(no peer reviewers configured)"
     ask = "".join(f"\n<@{h}> please reply with your GitHub login" for h in asks)
-    return "\n".join([contracts.stage_line("Audit", iteration), f"pr: {pr or 'none'}", f"sha: {sha or 'none'}", "reviewers:", who, f"Reply `SIGN-OFF {pr or '<pr>'} {sha or '<sha>'} approve|changes` or accept/refute/needs contract decision items. No merge without a human." + ask, f"ref: {ref}"])
+    return "\n".join([contracts.stage_line("Audit", iteration), f"pr: {pr or 'none'}", f"sha: {sha or 'none'}", "reviewers:", who, f"Reply `SIGN-OFF {pr or '<pr>'} {sha or '<sha>'} approve|changes` or accept/refute/needs contract decision items. Driver merge follows R23/R24; a study-stage sign-off alone does not authorize merge." + ask, f"ref: {ref}"])
 
 
 # --- LLM prompts (three calls per iteration) ---------------------------------
@@ -114,9 +118,10 @@ def prompt_brief(problem: str, iteration: int, findings: list[str], peer_claims:
     return fit([("Task", f"Write the explorer's brief for iteration {iteration} of this study. Return JSON per the schema."), ("Study", problem), ("Peer claims (approaches taken elsewhere)", "\n".join(sorted(peer_claims)) or "none")], findings)
 
 
-def prompt_synthesis(problem: str, approach: contracts.Approach, explorer_report: str, reports: dict[str, dict]) -> str:
+def prompt_synthesis(problem: str, approach: contracts.Approach, explorer_report: str, reports: dict[str, dict], evidence: list[dict] = (), *, iteration: int = 1) -> str:
     rs = [(f"{role} report (stance: {r.get('stance') or 'none'})", r.get("report", "")) for role, r in sorted(reports.items())] or [("Debate", "no debate rounds; synthesise from the explorer report alone")]
-    return fit([("Task", "Produce the debater consensus block for design audit before implementation. Return JSON per the schema."), ("Study", problem), ("Approach", f"{approach.slug}: {approach.title}"), ("Explorer report", explorer_report), *rs], [])
+    answers = [(f"Evidence answer (return {e['design_returns']}, round {e['round']}, {e['lens']})", e["answer"]) for e in evidence if e.get("iteration") == iteration and e.get("answer")]
+    return fit([("Task", "Produce the debater consensus block for design audit before implementation. Return JSON per the schema."), ("Study", problem), ("Approach", f"{approach.slug}: {approach.title}"), ("Explorer report", explorer_report), *rs, *answers], [])
 
 
 def prompt_deliver(problem: str, approach: contracts.Approach, synthesis: str, implementer_summary: str, audit_summary: str, findings: list[str], partial: bool) -> str:

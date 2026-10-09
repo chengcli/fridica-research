@@ -58,7 +58,7 @@ def test_contract_line_change_is_structural(monkeypatch):
 
 
 def test_added_action_field_is_schema(monkeypatch):
-    monkeypatch.setattr(machine.M, "board", lambda self: self.emit("board_update", self.aid("board"), thread=self.s.thread, generation=self.s.generation))
+    monkeypatch.setattr(machine.M, "board", lambda self: self.emit("board_update", self.aid("board"), thread=self.s.thread, future_generation=self.s.generation))
     r = replay.replay(ROOT / "001_simple_research")
     assert r.corpora[0].cls == "D3" and r.corpora[0].added and not r.ok
     assert replay.replay(ROOT / "001_simple_research", accept_added_fields=True).ok

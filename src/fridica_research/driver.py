@@ -15,7 +15,7 @@ import subprocess
 import time
 from typing import Callable
 
-from . import briefs, contracts, machine
+from . import briefs, contracts, machine, provenance
 from .client import Client, ControlError, Unavailable
 from .config import Config
 from .machine import Action, Event, State
@@ -49,6 +49,7 @@ class Driver:
         self.board = board
         self.github = github  # github.GitHub when `[github] enabled` (R21, R23, R24); None keeps Slack-only sign-offs
         self.recovered = False
+        self.producer = provenance.running_revision()
 
     # -- translation --------------------------------------------------------------
     def translate(self, e: dict) -> list[tuple[str, Event]]:
@@ -67,7 +68,16 @@ class Driver:
                 if not (meta_kind == "study_root" or (own and self.cfg.starters == ()) or e.get("sender") in self.cfg.starters): return []
                 root = contracts.parse_root(text)
                 gen = root.generation if root.generation is not None else (1 if own else self.cfg.max_generations)
-                out = [(thread, Event("started", now, {"channel": e["channel"]["id"], "problem": root.text, "generation": gen, "lineage": root.lineage or "", "spawner": own, "projected_hours": root.projected_hours or self.cfg.default_projected_hours}))]
+                subject, bootstrap = root.subject, root.bootstrap
+                if own and gen > 1:
+                    bootstrap = {**(bootstrap or {}), "parent_revision": None}
+                if own and subject and gen > 1:
+                    parent_sha = self.store.get_meta(f"github:revision:{subject['repo']}:g{gen - 1}")
+                    parent = provenance.identity({"repo": subject["repo"], "sha": parent_sha, "tree": None})
+                    if parent:
+                        subject = parent
+                        bootstrap = {**(bootstrap or {}), "parent_revision": parent_sha}
+                out = [(thread, Event("started", now, {"channel": e["channel"]["id"], "problem": root.text, "generation": gen, "lineage": root.lineage or "", "spawner": own, "projected_hours": root.projected_hours or self.cfg.default_projected_hours, "subject": subject, "bootstrap": bootstrap}))]
                 parent = self.parent_waiting_on(contracts.ref_of(text)) if own else None
                 if parent: out.insert(0, (parent, Event("own_post_seen", now, {"ts": e["ts"], "kind": "study_root", "text": text, "child_thread": thread})))
                 return out
@@ -114,8 +124,9 @@ class Driver:
         state = self.store.load(thread)
         if ev.kind == "started":
             if state is not None: return state
-            state, actions = machine.start(thread, ev["channel"], ev["problem"], ev.now, generation=ev["generation"], lineage=ev["lineage"], spawner=ev["spawner"], projected_hours=ev["projected_hours"], cfg=self.cfg)
+            state, actions = machine.start(thread, ev["channel"], ev["problem"], ev.now, generation=ev["generation"], lineage=ev["lineage"], spawner=ev["spawner"], projected_hours=ev["projected_hours"], cfg=self.cfg, producer=self.producer, subject=ev.get("subject"), bootstrap=ev.get("bootstrap"))
         else:
+            ev = Event(ev.kind, ev.now, {**ev.data, "producer": self.producer})
             state, actions = machine.step(state, ev, self.cfg)
         self.store.save(state, cursor, self.clock())
         for a in actions: log.info("%s %s %s", thread, a.kind, a.id)
@@ -127,7 +138,7 @@ class Driver:
         now = self.clock()
         try:
             if a.kind == "delegate":
-                body = {k: v for k, v in a.data.items() if k not in ("thread", "action_id", "lens", "lens_sha256")}
+                body = {k: v for k, v in a.data.items() if k not in ("thread", "action_id", "lens", "lens_sha256", "generation", "producer", "subject", "target", "bootstrap")}
                 r = self.client.delegate(state.thread, body)
                 jobs = r.get("jobs") or []
                 return [Event("delegated", now, {"action_id": a.id, "join_group": r.get("join_group", ""), "jobs": jobs})]
@@ -143,7 +154,7 @@ class Driver:
             elif a.kind == "llm_call":
                 return [self.run_llm(a.id, a["name"], a["prompt"])]
             elif a.kind == "board_update" and self.board is not None:
-                self.board.sync(state)
+                return [Event("finding", now, {"text": finding}) for finding in self.board.sync(state) or []]
         except ControlError as e:
             log.warning("%s %s failed: %s", a.kind, a.id, e)
             if a.kind == "delegate": return [Event("delegate_refused", now, {"action_id": a.id, "code": e.code, "status": e.status, "role": a["role"]})]
@@ -181,7 +192,7 @@ class Driver:
                 continue
             if w["kind"] == "llm":
                 name = {"brief": "study_brief", "synth": "study_synthesis", "deliver": "study_deliver"}[w["id"].rsplit("/", 1)[1]]
-                prompt = {"study_brief": lambda: briefs.prompt_brief(s.problem, s.iteration, s.findings, s.peer_claims), "study_synthesis": lambda: briefs.prompt_synthesis(s.problem, s.approach(), s.explorer_report, s.reports), "study_deliver": lambda: briefs.prompt_deliver(s.problem, s.approach(), s.synthesis.get("synthesis", ""), s.implementer.get("summary", ""), s.audit.get("summary", ""), s.findings, s.partial)}[name]()
+                prompt = {"study_brief": lambda: briefs.prompt_brief(s.problem, s.iteration, s.findings, s.peer_claims), "study_synthesis": lambda: briefs.prompt_synthesis(s.problem, s.approach(), s.explorer_report, s.reports, s.evidence, iteration=s.iteration), "study_deliver": lambda: briefs.prompt_deliver(s.problem, s.approach(), s.synthesis.get("synthesis", ""), s.implementer.get("summary", ""), s.audit.get("summary", ""), s.findings, s.partial)}[name]()
                 self.apply(s.thread, self.run_llm(w["id"], name, prompt))
             elif w["kind"] in ("group", "slot"):
                 known = {j.get("action_id") for j in s.group["jobs"].values()}

@@ -11,7 +11,7 @@ from . import config, contracts, provenance
 from .board import Board, role_totals
 from .client import Client, read_capability
 from .driver import Driver, claude_runner
-from .github import GitHub, PrHygieneError
+from .github import GitHub, MilestoneMissing, PrHygieneError
 from .replay import replay
 from .roles import ROLES, LENSES
 from .store import Store
@@ -70,7 +70,7 @@ def cmd_command(cfg: config.Config, args, cmd: str) -> int:
 def cmd_serve(cfg: config.Config, args) -> int:
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(message)s")
     store = Store(cfg.state_file)
-    board = Board(cfg, remember=store.set_meta, recall=store.get_meta, issue_numbers=_issue_numbers(store)) if cfg.board.enabled else None
+    board = Board(cfg, remember=store.set_meta, recall=store.get_meta) if cfg.board.enabled else None
     github = GitHub(cfg, remember=store.set_meta, recall=store.get_meta) if cfg.github.enabled else None
     Driver(cfg, build_client(cfg), store, llm=claude_runner(cfg.llm_model), board=board, github=github).serve(once=args.once)
     return 0
@@ -86,19 +86,18 @@ def cmd_pr(cfg: config.Config, args) -> int:
             return 1
         closes = args.closes if args.closes is not None else json.loads(store.get_meta(f"board:{s.thread}") or "{}").get("issue")
         gh = GitHub(cfg, remember=store.set_meta, recall=store.get_meta)
-        try: url = gh.open_pr(args.repo, args.head, args.base, args.title, gh.next_pr_body(args.repo, args.summary, closes, s.thread, s.generation))
-        except PrHygieneError as e:
+        try:
+            if args.milestone:  # the override: an existing milestone only, never created
+                m = {"number": gh.milestone(args.repo, args.milestone, create=False), "title": args.milestone}
+            else: m = gh.adopted_milestone(s.thread, args.repo) or {}
+            url = gh.open_pr(args.repo, args.head, args.base, args.title, gh.next_pr_body(args.repo, args.summary, closes, s.thread, s.generation, m.get("title", "")), m.get("number"))
+        except (PrHygieneError, MilestoneMissing) as e:
             print(str(e), file=sys.stderr)
             return 1
         print(url)
         return 0
     finally:
         store.close()
-
-
-def _issue_numbers(store: Store) -> dict:
-    rows = store.db.execute("SELECT key, value FROM meta WHERE key LIKE 'issue:%'").fetchall()
-    return {k.split(":", 1)[1]: v for k, v in rows}
 
 
 def parser() -> argparse.ArgumentParser:
@@ -129,6 +128,7 @@ def parser() -> argparse.ArgumentParser:
     pr.add_argument("--title", required=True)
     pr.add_argument("--summary", default="")
     pr.add_argument("--closes", type=int, default=None, help="the issue the PR closes (default: the study card)")
+    pr.add_argument("--milestone", default=None, help="an existing milestone title (R<n>) overriding the adopted issue's or the generation's; never created")
     v = sub.add_parser("serve", help="run the driver loop")
     v.add_argument("--once", action="store_true", help="one pass over the feed, then exit")
     r = sub.add_parser("replay", help="fold a replay corpus (or every corpus under a directory) through the machine and compare (R19)")

@@ -85,6 +85,7 @@ fridica-research stop <workspace:channel:root_ts>
 fridica-research resume <thread>             # after a Blocked study is fixed
 fridica-research note <thread> "R9: ..."     # a mid-stage change: a finding for this iteration, never sent to a running worker
 fridica-research pr <thread> --repo o/r --head b --title T   # open the study's PR (refused without Closes #N, thread, board, milestone)
+fridica-research pr <thread> ... --milestone R2               # an existing milestone instead of the adopted issue's or the generation's (never created)
 ```
 
 Needs fridica with the #126 external-driver surface (PR B: `POST /threads/<id>/delegate`,

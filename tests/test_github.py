@@ -215,11 +215,11 @@ def test_one_mirror_line_per_review_never_parsed_back():
     gh.prs[("o/r", "9")]["reviews"].append(rv(2, "reviewer", "APPROVED", at="2026-10-04T11:00:00Z"))
     second = poll(g, w)
     third = poll(g, w)
-    lines = [t for _, t in first.posts + second.posts + third.posts if t.startswith("SIGN-OFF")]
-    assert lines == [f"SIGN-OFF {contracts.MIRROR_MARK} reviewer: COMMENTED on o/r#9 at {HEAD[:12]}", f"SIGN-OFF {contracts.MIRROR_MARK} reviewer: APPROVED on o/r#9 at {HEAD[:12]}"]
+    lines = [t for _, t in first.posts + second.posts + third.posts if t.startswith(contracts.MIRROR_MARK)]
+    assert lines == [f"{contracts.MIRROR_MARK} reviewer: COMMENTED on o/r#9 at {HEAD[:12]}", f"{contracts.MIRROR_MARK} reviewer: APPROVED on o/r#9 at {HEAD[:12]}"]
     for line in lines:
         assert contracts.parse_signoff(line) is None and "sign_off" not in replay.contract_lines(line)
-    assert contracts.parse_signoff(f"SIGN-OFF {contracts.MIRROR_MARK} x\nSIGN-OFF {PR} {SHA} approve") is None  # the whole mirror post is never a sign-off
+    assert contracts.parse_signoff(f"{contracts.MIRROR_MARK} x\nSIGN-OFF {PR} {SHA} approve") is None  # the whole mirror post is never a sign-off
 
 
 def test_driver_mirrors_into_the_thread_and_the_echo_is_not_a_signoff(tmp_path, sock_dir):
@@ -279,7 +279,7 @@ def test_b1_reviews_bind_to_the_head_through_rest_commit_id_never_latest_reviews
         if merges:
             assert [e.data for e in out.events] == [{"sender": REV, "pr": PR, "sha": real_head, "verdict": "approve"}] and w.state.audit_scopes["scope"]["verdict"] == "approve"
             assert gh.argv("gh", "pr", "merge") == [["gh", "pr", "merge", "9", "-R", "o/r", "--squash", "--match-head-commit", real_head]]
-            assert (f"review-{REAL_REVIEW['id']}", f"SIGN-OFF {contracts.MIRROR_MARK} UCzhangxi: APPROVED on o/r#9 at {real_head[:12]}") in out.posts
+            assert (f"review-{REAL_REVIEW['id']}", f"{contracts.MIRROR_MARK} UCzhangxi: APPROVED on o/r#9 at {real_head[:12]}") in out.posts
         else:
             assert out.events == [] and not gh.argv("gh", "pr", "merge") and w.state.audit_scopes["scope"]["signed_at"] is None
         assert all("latestReviews" not in a[a.index("--json") + 1] for a in gh.argv("gh", "pr", "view"))
@@ -539,7 +539,7 @@ def test_round2_f3_a_dismissed_approval_is_taken_back_and_never_counts():
     rs = gh.prs[("o/r", "9")]["reviews"]
     rs[0]["state"] = "DISMISSED"  # GitHub shows a dismissed review with its id, commit and submitted_at unchanged
     out = poll(g, w)
-    assert ("dismissed-1", f"SIGN-OFF (GitHub review, mirrored) reviewer: DISMISSED on o/r#9 at {HEAD[:12]}") in out.posts and len(gh.argv("gh", "pr", "merge")) == 1
+    assert ("dismissed-1", f"Review (GitHub, mirrored) reviewer: DISMISSED on o/r#9 at {HEAD[:12]}") in out.posts and len(gh.argv("gh", "pr", "merge")) == 1
     assert w.state.findings[-1].endswith(f"GitHub review by reviewer on o/r#9 at {HEAD[:12]} was dismissed: it no longer counts toward the merge")
     poll(g, w)
     assert len(gh.argv("gh", "pr", "merge")) == 1  # a dismissed verdict never merges
@@ -765,7 +765,7 @@ def test_round5_a_a_dismissed_approval_reopens_its_audit_scope():
     gh, g, w = approved_in_deliver()
     gh.prs[("o/r", "9")]["reviews"][0]["state"] = "DISMISSED"  # dismissed by hand: id, commit and submitted_at unchanged
     out = poll(g, w)
-    assert ("dismissed-1", f"SIGN-OFF (GitHub review, mirrored) reviewer: DISMISSED on o/r#9 at {HEAD[:12]}") in out.posts
+    assert ("dismissed-1", f"Review (GitHub, mirrored) reviewer: DISMISSED on o/r#9 at {HEAD[:12]}") in out.posts
     assert [e.data for e in out.events if e.kind == "sign_off"] == [{"sender": REV, "pr": PR, "sha": HEAD, "verdict": "dismissed"}]
     assert_reopened(w, gh)
     out = poll(g, w)
@@ -780,7 +780,7 @@ def test_round5_a_a_push_withdraws_the_approval_of_the_old_head(dismissed):
     pr["headRefOid"] = "abcdef1" + "2" * 33
     if dismissed: pr["reviews"][0]["state"] = "DISMISSED"
     out = poll(g, w)
-    assert (("dismissed-1", f"SIGN-OFF (GitHub review, mirrored) reviewer: DISMISSED on o/r#9 at {HEAD[:12]}") in out.posts) == dismissed
+    assert (("dismissed-1", f"Review (GitHub, mirrored) reviewer: DISMISSED on o/r#9 at {HEAD[:12]}") in out.posts) == dismissed
     assert any(e.kind == "sign_off" and e.data["verdict"] == "dismissed" and e.data["sha"] == HEAD for e in out.events)
     assert_reopened(w, gh)
 
@@ -866,7 +866,7 @@ def test_issue30_2_a_failed_acknowledgement_survives_a_later_approval_by_the_sam
     assert [d for _, d in gh.api("repos/o/r/issues/9/comments")] == [{"body": "@reviewer acknowledged, goes into the next PR."}] * 2  # the failed reply, then exactly one
     assert ("ack-9", "acknowledged, goes into the next PR: post-merge review by reviewer on o/r#9") in out.posts
     assert sum(f.endswith("post-merge review by reviewer on o/r#9: rename foo") for f in w.state.findings) == 1 and g.carried("o/r") == {"reviewer": ["rename foo"]}
-    assert ("review-10", f"SIGN-OFF (GitHub review, mirrored) reviewer: APPROVED on o/r#9 at {HEAD[:12]} (after merge)") in out.posts and "10" in [i.key for i in out.items]
+    assert ("review-10", f"Review (GitHub, mirrored) reviewer: APPROVED on o/r#9 at {HEAD[:12]} (after merge)") in out.posts and "10" in [i.key for i in out.items]
 
 
 def test_issue37_1_a_late_review_after_a_late_changes_review_reopened_deliver_is_collected():
@@ -882,7 +882,7 @@ def test_issue37_1_a_late_review_after_a_late_changes_review_reopened_deliver_is
     rs.append(rv(10, "reviewer", "CHANGES_REQUESTED", at="2026-10-04T14:00:00Z", body="- add a test"))
     out = poll(g, w)
     ack = "acknowledged, goes into the next PR: post-merge review by reviewer on o/r#9"
-    assert ("ack-10", ack) in out.posts and ("review-10", f"SIGN-OFF (GitHub review, mirrored) reviewer: CHANGES_REQUESTED on o/r#9 at {HEAD[:12]} (after merge)") in out.posts
+    assert ("ack-10", ack) in out.posts and ("review-10", f"Review (GitHub, mirrored) reviewer: CHANGES_REQUESTED on o/r#9 at {HEAD[:12]} (after merge)") in out.posts
     assert [d["body"] for _, d in gh.api("repos/o/r/issues/9/comments")] == ["@reviewer acknowledged, goes into the next PR."] * 2
     assert g.carried("o/r") == {"reviewer": ["rename foo", "add a test"]}
     assert any(f.endswith("post-merge review by reviewer on o/r#9: add a test") for f in w.state.findings)

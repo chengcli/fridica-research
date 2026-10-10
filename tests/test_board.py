@@ -198,7 +198,7 @@ def test_role_totals():
 def test_existing_issue_is_attached_not_created():
     w = World(cfg=BCFG)
     b, gh, meta = make()
-    b.issue_numbers = {w.start().thread: 42}
+    meta[f"issue:{w.start().thread}"] = "42"
     b.sync(w.state)
     assert [a[6] for a in gh.argv("gh", "issue", "create")] == ["Explore (iteration 1): Study the thing"]
     assert gh.sets(board.M_ADD_ITEM)[0]["content"] == "I_42" and gh.argv("gh", "issue", "create")[0][8].startswith("Study: #42")

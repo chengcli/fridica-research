@@ -203,6 +203,7 @@ class Projects:
     def set_status(self, issue: int, key: str): self.set_option(issue, "Status", STATUS[key])  # R14: Status is built in, discovered like any field
     def edit_issue(self, number: int, *args: str): self.run(["gh", "issue", "edit", str(number), "-R", self.b.repo, *args], None)
     def close_issue(self, number: int): self.run(["gh", "issue", "close", str(number), "-R", self.b.repo], None)
+    def comment_issue(self, number: int, body: str): self.run(["gh", "issue", "comment", str(number), "-R", self.b.repo, "--body", body], None)
 
 
 # --- the study projection ----------------------------------------------------
@@ -242,11 +243,10 @@ def role_totals(state: State) -> dict[str, dict[str, float]]:
 class Board:
     """Mirrors a study onto the project: one plain issue per study, one per stage run, one per audit scope (R9, R13)."""
 
-    def __init__(self, cfg: Config, runner: Runner | None = None, remember=lambda k, v: None, recall=lambda k: None, issue_numbers: dict | None = None):
+    def __init__(self, cfg: Config, runner: Runner | None = None, remember=lambda k, v: None, recall=lambda k: None):
         self.cfg, self.b = cfg, cfg.board
         self.api = Projects(cfg, runner, remember, recall)
         self.remember, self.recall = remember, recall
-        self.issue_numbers = issue_numbers or {}  # thread/channel -> issue number given by `start --issue N`
 
     def login(self, slack_id: str, state: State) -> str: return self.cfg.login_of(slack_id, state.people)
     def title(self, state: State) -> str: return state.problem.strip().splitlines()[0][:80] if state.problem.strip() else state.thread
@@ -271,7 +271,7 @@ class Board:
             self.sync_study(state, cards)
             self.sync_stages(state, cards)
             if state.stage in ("Delivered", "Stopped") and not cards.get("closed"):
-                self.close(cards["issue"], day(state.finished_at or state.stage_log[-1]["end"]), ((state.finished_at or state.stage_log[-1]["end"] or state.started_at) - state.started_at) / 3600)
+                self.close(cards["issue"], day(state.finished_at or state.stage_log[-1]["end"]), ((state.finished_at or state.stage_log[-1]["end"] or state.started_at) - state.started_at) / 3600, close_issue=not cards.get("given"))
                 cards["closed"] = True
         except Exception as e:  # noqa: BLE001 - the board must never stall a stage
             log.warning("board update failed for %s: %s", state.thread, e)
@@ -303,11 +303,12 @@ class Board:
         self.api.set_text(number, "Thread", state.thread)
         return all(result is not False for result in selected)
 
-    def close(self, number: int, finished: str | None, actual_hours: float):
+    def close(self, number: int, finished: str | None, actual_hours: float, close_issue: bool = True):
+        """Finished, Actual hours and Done; the issue itself stays open when it was adopted (the PR's `Closes #N` closes it)."""
         self.api.set_dates(number, finished=finished)
         self.api.set_number(number, "Actual hours", round(actual_hours, 2))
         self.api.set_status(number, "done")
-        self.api.close_issue(number)
+        if close_issue: self.api.close_issue(number)
 
     def sync_study(self, state: State, cards: dict):
         owner_login = self.login(self.cfg.owner, state)
@@ -316,13 +317,21 @@ class Board:
         misses = {k: v for k, v in state.mention_misses.items() if v >= 2}
         if misses: body += "\n\nRepeated handoff mention misses: " + json.dumps(misses, sort_keys=True)
         if "issue" not in cards:
-            given = self.issue_numbers.get(state.thread) or self.issue_numbers.get(state.channel)
+            # `start --issue N` writes `issue:<channel>` while the driver serves: read live, never from a map built at startup
+            given_key = next((k for k in (f"issue:{state.thread}", f"issue:{state.channel}") if self.recall(k)), None)
+            given = self.recall(given_key) if given_key else None
             cards["issue"], cards["given"], cards["filled"] = (int(given) if given else self.api.create_issue(self.title(state), body, owner_login)), bool(given), False
+            if given_key:  # adopted: the cards are stored first, then the key is consumed, so a later study in the channel does not adopt it again
+                self.remember(f"board:{state.thread}", json.dumps(cards))
+                self.remember(given_key, None)
         n = cards["issue"]
         if not cards.get("filled", True):  # creation-time writes, finished on a later sync if gh failed midway
             if cards.get("given") and owner_login: self.api.edit_issue(n, "--add-assignee", owner_login)
             cards["filled"] = self.fill_card(n, "driver", "Explore", state.started_at, state.projected_hours * 3600, state)
             if owner_login: self.api.set_text(n, "Owner", owner_login)
+        if cards.get("given") and not cards.get("commented"):  # once per adopted issue: recorded with the cards (store meta) after it was posted
+            self.api.comment_issue(n, f"Adopted as the study card of fridica-research study {state.thread} (generation {state.generation}); stage cards link here as `Study: #{n}`. The driver never closes this issue; the PR's `Closes #{n}` does.")
+            cards["commented"] = True
         self.api.edit_issue(n, "--body", body)
         self.api.set_option(n, "Stage", BOARD_STAGE.get(state.stage, state.stage))
         self.api.set_number(n, "Iteration", state.iteration)

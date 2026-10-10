@@ -243,7 +243,7 @@ class SignOff:
 
 
 def parse_signoff(text: str) -> SignOff | None:
-    if MIRROR_MARK in text: return None  # the driver's mirror of a GitHub review is the record, never a sign-off (R21)
+    if MIRROR_MARK in text or LEGACY_MIRROR_MARK in text: return None  # the driver's mirror of a GitHub review is the record, never a sign-off (R21)
     fence = ""
     for line in text.splitlines():
         marker = re.match(r"^\s*(`{3,}|~{3,})", line)
@@ -257,7 +257,8 @@ def parse_signoff(text: str) -> SignOff | None:
 
 
 # -- GitHub pull requests (R21, R23, R24) ------------------------------------------
-MIRROR_MARK = "(GitHub review, mirrored)"
+MIRROR_MARK = "Review (GitHub, mirrored)"  # the mirror line's prefix: no line but a sign-off starts with "SIGN-OFF"
+LEGACY_MIRROR_MARK = "SIGN-OFF (GitHub review, mirrored)"  # mirror lines posted before #39; still never read as a sign-off
 _PR_URL = re.compile(r"https://github\.com/(?P<repo>[\w.-]+/[\w.-]+)/pull/(?P<n>\d+)")
 _PR_SHORT = re.compile(r"^(?:(?P<repo>[\w.-]+/[\w.-]+)#|#?)(?P<n>\d+)$")
 
@@ -282,7 +283,7 @@ def same_pr(a: str, b: str) -> bool:
 def mirror_line(login: str, review_state: str, pr: str, sha: str, after_merge: bool = False) -> str:
     """The one line the driver posts in the study thread for a GitHub review; `parse_signoff` never reads it back."""
     repo, n = pr_id(pr)
-    return f"SIGN-OFF {MIRROR_MARK} {login}: {review_state} on {repo}#{n} at {sha[:12]}" + (" (after merge)" if after_merge else "")
+    return f"{MIRROR_MARK} {login}: {review_state} on {repo}#{n} at {sha[:12]}" + (" (after merge)" if after_merge else "")
 
 
 POST_MERGE_HEAD = "From post-merge review by "

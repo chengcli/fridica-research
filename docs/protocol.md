@@ -133,7 +133,12 @@ Audit per scope, Deliver, per iteration) is its own plain issue (R13), created w
 starts and added as its own project item, closed when the stage ends. The issue number is
 recorded in the store right after `gh issue create`, before the project item and its fields are
 written, so a gh failure midway makes the next sync finish the writes on that issue rather than
-open a second one. Fields:
+open a second one. An issue given to `start --issue N` (store meta `issue:<channel>`) is read when
+the study's card is first made, also when `serve` was already running; it is adopted, the cards
+are stored, and only then is the key deleted, so a later study in the channel makes its own issue.
+The adopted issue gets one comment naming the study (recorded with the cards once posted) and,
+when the study ends, its Finished date, Actual hours and Done status, but the driver never closes
+it: the PR's `Closes #N` does. Fields:
 Stage (single select: Explore, Claim, Debate, Implement, Audit, Deliver, Delivered, Stopped),
 Role (single select, R12), Status (built in, R14), Iteration, Generation, Projected hours,
 Actual hours (number), Started, Projected finish, Finished (date), Owner, Approach, Workers,
@@ -319,8 +324,9 @@ closes on it, `changes` returns the study), `COMMENTED` -> a finding without ver
 verdict by a login no Slack id maps to closes no card; it becomes a finding naming the login
 (`no Slack id maps to <login>`), and still counts for the merge.
 Each counted review is mirrored into the study thread as exactly one line,
-`SIGN-OFF (GitHub review, mirrored) <login>: <STATE> on <owner/repo>#<n> at <sha>`, with a
-`ref:` line; the marker makes `contracts.parse_signoff` return nothing for it, and own posts are
+`Review (GitHub, mirrored) <login>: <STATE> on <owner/repo>#<n> at <sha>`, with a
+`ref:` line; it never starts with `SIGN-OFF`, the marker (and that of the older
+`SIGN-OFF (GitHub review, mirrored)` lines) makes `contracts.parse_signoff` return nothing for it, and own posts are
 never parsed for sign-offs, so the mirror is the record and never a second sign-off. A mirrored
 review that GitHub later shows as `DISMISSED` (by hand, or as stale after a push) is mirrored once more with that
 state, with a finding (`GitHub review by <login> ... was dismissed: it no longer counts toward the
@@ -346,9 +352,9 @@ full GitHub head matches the implementer's abbreviated sha and a 6-digit prefix 
 `"<owner>/<name>" = {merge = "driver" | "owner", reviewers = [<logins>]}`; a repository not listed
 is `owner`. fridica-research is `driver`; fridica, fridica-core, fridica-agent and
 fridica-store-sqlite are `owner`. Every PR body the driver opens (`fridica-research pr <thread>
---repo --head --title [--base] [--summary] [--closes N]`, `GitHub.open_pr`) carries
+--repo --head --title [--base] [--summary] [--closes N] [--milestone R<n>]`, `GitHub.open_pr`) carries
 `Closes #N` (the study card, or `--closes`), `Study thread: <thread id>`, `Board: <project
-URL>` and `Milestone: R<generation>` (`contracts.pr_body`); the driver refuses to open a PR whose
+URL>` and `Milestone: R<n>` (`contracts.pr_body`; `R<generation>` unless the milestone rule below names another); the driver refuses to open a PR whose
 body lacks any of them (`contracts.pr_hygiene_missing`; the study line, the board link and the
 milestone may also share one line, `Study: Slack study thread <ts>, board <url>, milestone R2`).
 Opening is resumable: the PR, the project item, the milestone and each reviewer request are
@@ -357,8 +363,13 @@ head branch is reused (`gh pr list --head`), so running `fridica-research pr` ag
 step finishes the rest without a second PR; each reviewer is requested once, a 422 is not
 retried. The opened PR, and the PR under audit
 on its first poll, is added to the study's project (`addProjectV2ItemById` with the PR node id)
-and gets the generation milestone (`gh api -X PATCH repos/<o>/<r>/issues/<n> -F
-milestone=<number>`; milestones R1, R2, ... are created on demand).
+and gets a milestone (`gh api -X PATCH repos/<o>/<r>/issues/<n> -F milestone=<number>`): when the
+study adopted an existing issue (`start --issue N`) that has a milestone in the PR's repository,
+that issue's milestone, by its number (no title lookup); otherwise the generation milestone
+(milestones R1, R2, ... are created on demand). A study that created its own issue is unchanged.
+The body's `Milestone: R<n>` names the adopted issue's milestone when its title is `R<n>`, else
+`R<generation>`. `fridica-research pr --milestone <title>` overrides both with an existing
+milestone only: it is never created, and a missing one makes the command exit nonzero.
 
 The merge exists only for `merge = "driver"`: once the open, non-draft PR's assigned auditor's latest
 verdict on the current head is `APPROVED` (any other account's review is a finding only; a draft is

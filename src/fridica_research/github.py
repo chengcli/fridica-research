@@ -11,7 +11,7 @@ tests answer them with a fake. For the PR of a study in Audit, Deliver or Delive
   `latestReviews` leaves the oid empty); a review counts only when it is by the PR's assigned auditor
   (not a bot, not the PR's author; others are findings) and on the current head: APPROVED -> `sign_off approve`, CHANGES_REQUESTED ->
   `sign_off changes` (login -> Slack id through `Config.slack_of`), COMMENTED -> a finding without
-  verdict; each counted review is mirrored into the study thread as one SIGN-OFF line that the
+  verdict; each counted review is mirrored into the study thread as one `Review (GitHub, mirrored)` line that the
   driver never parses back (`contracts.MIRROR_MARK`), and once more as DISMISSED (with a finding) if GitHub dismisses it;
   a delivered approval that stops counting is withdrawn once (`sign_off dismissed`), reopening the scope it approved;
 - for a `[repos]` entry with `merge = "driver"` squash-merges an open, non-draft PR once the assigned auditor's
@@ -49,6 +49,10 @@ ACK = "acknowledged, goes into the next PR"
 
 class PrHygieneError(ValueError):
     """A PR body without `Closes #N`, the study thread, the board link or the milestone (R23)."""
+
+
+class MilestoneMissing(LookupError):
+    """`pr --milestone <title>` names a milestone the repository does not have (the override never creates one)."""
 
 
 @dataclass
@@ -155,15 +159,25 @@ class GitHub:
         repo, n = contracts.pr_id(pr)
         self.api("POST", f"repos/{repo}/issues/{n}/comments", {"body": body})
 
-    def milestone(self, repo: str, title: str) -> int:
-        """The number of the generation milestone `title` (R1, R2, ...), created on demand."""
+    def milestone(self, repo: str, title: str, create: bool = True) -> int:
+        """The number of the milestone `title` (R1, R2, ...), created on demand unless `create` is False."""
         for m in json.loads(self.run(["gh", "api", f"repos/{repo}/milestones?state=all&per_page=100"], None) or "[]"):
             if m.get("title") == title: return int(m["number"])
+        if not create: raise MilestoneMissing(f"{repo} has no milestone {title!r}")
         return int(json.loads(self.api("POST", f"repos/{repo}/milestones", {"title": title}))["number"])
 
-    def set_milestone(self, pr: str, title: str):
+    def set_milestone(self, pr: str, title: str, number: int | None = None):
+        """The PR's milestone object: `number` when given (the adopted issue's, or the override), else the milestone `title`."""
         repo, n = contracts.pr_id(pr)
-        self.run(["gh", "api", "-X", "PATCH", f"repos/{repo}/issues/{n}", "-F", f"milestone={self.milestone(repo, title)}"], None)
+        self.run(["gh", "api", "-X", "PATCH", f"repos/{repo}/issues/{n}", "-F", f"milestone={number if number is not None else self.milestone(repo, title)}"], None)
+
+    def adopted_milestone(self, thread: str, repo: str) -> dict | None:
+        """{number, title} of the milestone of the issue the study adopted (`start --issue N`), read by number; None when the study
+        created its own issue, the issue has no milestone, or it lives in another repository (milestone numbers are per repository)."""
+        cards = json.loads(self.recall(f"board:{thread}") or "{}")
+        if not (cards.get("given") and cards.get("issue") and self.cfg.board.repo.lower() == repo.lower()): return None
+        m = json.loads(self.run(["gh", "api", f"repos/{self.cfg.board.repo}/issues/{cards['issue']}"], None) or "{}").get("milestone")
+        return {"number": int(m["number"]), "title": str(m.get("title", ""))} if m else None
 
     def add_to_project(self, pr: str) -> str:
         repo, n = contracts.pr_id(pr)
@@ -180,18 +194,22 @@ class GitHub:
     def carried(self, repo: str) -> dict:
         return json.loads(self.recall(f"github:carry:{repo.lower()}") or "{}")
 
-    def next_pr_body(self, repo: str, summary: str, closes: int | None, thread: str, generation: int) -> str:
-        """The R23 body for the next PR to `repo`, with the post-merge items carried from earlier reviews (R24)."""
+    def next_pr_body(self, repo: str, summary: str, closes: int | None, thread: str, generation: int, milestone: str = "") -> str:
+        """The R23 body for the next PR to `repo`, with the post-merge items carried from earlier reviews (R24).
+
+        `Milestone:` names `milestone` (the adopted issue's, or the override) when it is `R<n>`, else `R<generation>`."""
         owner = self.cfg.login_of(self.cfg.owner) or self.cfg.owner or "unassigned"
         names = {"explorer": owner, "debater": owner, "implementer": owner, "auditor": ", ".join([r.login or self.cfg.login_of(r.handle) for r in self.cfg.reviewers]) or "unassigned", "driver and arbitrator": owner}
-        return contracts.pr_body(summary + "\n\n" + roles_table(names), closes, thread, self.board_url(), f"R{generation}", self.carried(repo))
+        return contracts.pr_body(summary + "\n\n" + roles_table(names), closes, thread, self.board_url(), milestone if re.fullmatch(r"R\d+", milestone) else f"R{generation}", self.carried(repo))
 
     def existing_pr(self, repo: str, head: str) -> str:
         prs = json.loads(self.run(["gh", "pr", "list", "-R", repo, "--head", head, "--state", "open", "--json", "url"], None) or "[]")
         return prs[0]["url"] if prs else ""
 
-    def open_pr(self, repo: str, head: str, base: str, title: str, body: str) -> str:
+    def open_pr(self, repo: str, head: str, base: str, title: str, body: str, milestone: int | None = None) -> str:
         """Refuses a body without the R23 lines; otherwise creates the PR, adds it to the project, sets the milestone, requests the reviewers.
+
+        The milestone object is `milestone` (a number: the adopted issue's, or the override) when given, else the one the body names.
 
         Resumable: each step is recorded (store meta `github:open:<repo>:<head>`) once done, and the PR of an earlier
         attempt is found again (`gh pr list --head`), so a retry after a failed step completes the rest without a second PR."""
@@ -218,7 +236,7 @@ class GitHub:
             p["project"] = True
             save()
         if not p.get("milestone"):
-            self.set_milestone(url, contracts.pr_milestone(body))
+            self.set_milestone(url, contracts.pr_milestone(body), milestone)
             p["milestone"] = True
             save()
         logins = [lg for lg in self.reviewers(url) if not self.is_bot({"login": lg})]
@@ -276,12 +294,12 @@ class GitHub:
         return out
 
     def hygiene(self, pr: str, state: State, v: dict, t: dict):
-        """R23 for the PR under audit: on the study's project and on the generation milestone (each step once, retried until it succeeds)."""
+        """R23 for the PR under audit: on the study's project and on the adopted issue's milestone, else the generation's (each step once, retried until it succeeds)."""
         try:
             if self.board_url() and not t.get("project"):
                 self.add_to_project(pr)
                 t["project"] = True
-            if not v.get("milestone") and not t.get("milestone"): self.set_milestone(pr, f"R{state.generation}")
+            if not v.get("milestone") and not t.get("milestone"): self.set_milestone(pr, f"R{state.generation}", (self.adopted_milestone(state.thread, contracts.pr_id(pr)[0]) or {}).get("number"))
             t["milestone"] = True
         except Exception as e:  # noqa: BLE001 - hygiene never stalls the sign-off
             log.warning("PR hygiene for %s failed: %s", pr, e)

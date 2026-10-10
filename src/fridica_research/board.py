@@ -330,7 +330,7 @@ class Board:
             cards["filled"] = self.fill_card(n, "driver", "Explore", state.started_at, state.projected_hours * 3600, state)
             if owner_login: self.api.set_text(n, "Owner", owner_login)
         if cards.get("given") and not cards.get("commented"):  # once per adopted issue: recorded with the cards (store meta) after it was posted
-            self.api.comment_issue(n, f"Adopted as the study card of fridica-research study {state.thread} (generation {state.generation}); stage cards link here as `Study: #{n}`.")
+            self.api.comment_issue(n, f"Adopted as the study card of fridica-research study {state.thread} (generation {state.generation}); stage cards link here as `Study: #{n}`. The driver never closes this issue; the PR's `Closes #{n}` does.")
             cards["commented"] = True
         self.api.edit_issue(n, "--body", body)
         self.api.set_option(n, "Stage", BOARD_STAGE.get(state.stage, state.stage))

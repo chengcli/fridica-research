@@ -46,6 +46,7 @@ def test_adopted_issue_gets_one_comment_retried_until_posted():
     b.sync(w.state)
     comments = gh.argv("gh", "issue", "comment")
     assert len(comments) == 2 and comments[-1][:5] == ["gh", "issue", "comment", "42", "-R"] and w.state.thread in comments[-1][-1]
+    assert "The driver never closes this issue" in comments[-1][-1]
     assert json.loads(meta[f"board:{w.state.thread}"])["commented"] is True
 
 
@@ -123,7 +124,7 @@ def write_config(tmp_path) -> str:
     return str(p)
 
 
-def run_pr(tmp_path, monkeypatch, gh, *extra, given=True):
+def run_pr(tmp_path, monkeypatch, gh, *extra, given=True, repo="o/r"):
     monkeypatch.setattr(github, "subprocess_runner", lambda token_env: gh)
     cfgp = write_config(tmp_path)
     store = Store(tmp_path / "s.sqlite3")
@@ -131,7 +132,7 @@ def run_pr(tmp_path, monkeypatch, gh, *extra, given=True):
     store.save(w.start())
     store.set_meta(f"board:{w.state.thread}", json.dumps({"issue": 42, "given": given, "stages": []}))
     store.close()
-    return cli.main(["--config", cfgp, "pr", w.state.thread, "--repo", "o/r", "--head", "b", "--title", "t", *extra])
+    return cli.main(["--config", cfgp, "pr", w.state.thread, "--repo", repo, "--head", "b", "--title", "t", *extra])
 
 
 def test_pr_cli_takes_the_adopted_issues_milestone_number_and_names_it_when_r_n(tmp_path, monkeypatch, capsys):
@@ -158,6 +159,27 @@ def test_pr_cli_milestone_override_never_creates(tmp_path, monkeypatch, capsys):
     assert run_pr(tmp_path, monkeypatch, gh, "--milestone", "R2") == 0
     assert "Milestone: R2" in gh.argv("gh", "pr", "create")[0][-1]
     assert gh.argv("gh", "api", "-X", "PATCH") == [["gh", "api", "-X", "PATCH", "repos/o/r/issues/13", "-F", "milestone=2"]]
+
+
+def test_adopted_issue_milestone_only_for_a_pr_in_the_issues_repository(tmp_path, monkeypatch):
+    """Milestone numbers are per repository: the adopted issue (in `[board] repo` o/r) gives its number only to a PR in o/r;
+    a PR in another repository gets R<generation>, at open and at first poll."""
+    for d in ("same", "other"): (tmp_path / d).mkdir()
+    gh = IssueGh(issues={42: {"number": 5, "title": "R3"}})  # open, same repository: the issue's number and title
+    assert run_pr(tmp_path / "same", monkeypatch, gh) == 0
+    assert "Milestone: R3" in gh.argv("gh", "pr", "create")[0][-1]
+    assert gh.argv("gh", "api", "-X", "PATCH") == [["gh", "api", "-X", "PATCH", "repos/o/r/issues/13", "-F", "milestone=5"]]
+    gh = IssueGh(issues={42: {"number": 5, "title": "R3"}})  # open, another repository: the generation milestone of o/x, by title
+    assert run_pr(tmp_path / "other", monkeypatch, gh, repo="o/x") == 0
+    assert "Milestone: R1" in gh.argv("gh", "pr", "create")[0][-1] and not gh.argv("gh", "api", "repos/o/r/issues/42")
+    assert gh.argv("gh", "api", "-X", "PATCH") == [["gh", "api", "-X", "PATCH", "repos/o/x/issues/13", "-F", "milestone=1"]] and gh.api("repos/o/x/milestones")[-1][1] == {"title": "R1"}
+    for pr, patch in ((tg.PR, ["repos/o/r/issues/9", "-F", "milestone=5"]), ("https://github.com/o/x/pull/9", ["repos/o/x/issues/9", "-F", "milestone=1"])):  # first poll
+        gh = IssueGh((pr, {}), issues={42: {"number": 5, "title": "R3"}})
+        g, meta = tg.make(gh)
+        w = tg.audit_world(pr=pr)
+        adopt(meta, w.state.thread)
+        tg.poll(g, w)
+        assert gh.argv("gh", "api", "-X", "PATCH") == [["gh", "api", "-X", "PATCH", *patch]]
 
 
 # -- Q4: the mirror line ------------------------------------------------------------------

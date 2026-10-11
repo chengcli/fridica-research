@@ -305,7 +305,9 @@ def pr_hygiene_missing(body: str) -> list[str]:
 # The study line, the board link and the milestone each on its own line (`pr_body`), or sharing one line
 # ("Study: Slack study thread <ts>, board <url>, milestone R2").
 MILESTONE = r"R\d+(?:\.\d+)*"  # a generation milestone, dotted parts and all: R2, R2.1, R10.3.2 (#47)
-_MILESTONE = rf"(?:^Milestone:|\bmilestone) ({MILESTONE})\b"
+# Not followed by a word character or `-`, nor by `.` and then a word character, `.` or `-` (#59): refuses R2.x, R2.1a, R2..1,
+# R2_1 and R2-1 without falling back to `R2`, and keeps a trailing `.`, `,` or `)` (`milestone R2.`).
+_MILESTONE = rf"(?:^Milestone:|\bmilestone) ({MILESTONE})(?![\w-]|\.[\w.-])"
 _HYGIENE = (("Closes #N", r"^Closes #\d+\s*$"), ("study thread", r"^(?:Study thread: \S+|Study:.*\bstudy thread \S+)"), ("board link", r"(?:^Board:|\bboard) https://github\.com/\S+"), ("milestone", _MILESTONE))
 
 

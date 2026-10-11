@@ -332,7 +332,7 @@ class Board:
         if cards.get("given") and not cards.get("commented"):  # once per adopted issue: recorded with the cards (store meta) after it was posted
             self.api.comment_issue(n, f"Adopted as the study card of fridica-research study {state.thread} (generation {state.generation}); stage cards link here as `Study: #{n}`. The driver never closes this issue; the PR's `Closes #{n}` does.")
             cards["commented"] = True
-        self.api.edit_issue(n, "--body", body)
+        if not cards.get("given"): self.api.edit_issue(n, "--body", body)  # #49: an adopted body is the maintainer's; stage and iteration are board fields
         self.api.set_option(n, "Stage", BOARD_STAGE.get(state.stage, state.stage))
         self.api.set_number(n, "Iteration", state.iteration)
         for field, value in (("Approach", (state.claim or {}).get("slug")), ("Workers", _workers(state, self.cfg)), ("Result", state.notes[-1] if state.stage in ("Stopped", "Blocked") and state.notes else state.deliverable.get("summary", "")[:500]), ("Follow-on", state.followon), ("Peer reviewers", ", ".join(filter(None, (self.login(r.handle, state) for r in self.cfg.reviewers))))):

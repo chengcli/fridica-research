@@ -138,7 +138,9 @@ the study's card is first made, also when `serve` was already running; it is ado
 are stored, and only then is the key deleted, so a later study in the channel makes its own issue.
 The adopted issue gets one comment naming the study (recorded with the cards once posted) and,
 when the study ends, its Finished date, Actual hours and Done status, but the driver never closes
-it: the PR's `Closes #N` does. Fields:
+it: the PR's `Closes #N` does. Nor does it ever edit the adopted issue's body, which is the
+maintainer's (close criteria); a created issue's body carries the stage and roles tables, an
+adopted one gets stage and iteration only as board fields (#49). Fields:
 Stage (single select: Explore, Claim, Debate, Implement, Audit, Deliver, Delivered, Stopped),
 Role (single select, R12), Status (built in, R14), Iteration, Generation, Projected hours,
 Actual hours (number), Started, Projected finish, Finished (date), Owner, Approach, Workers,

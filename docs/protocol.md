@@ -528,10 +528,14 @@ fridica-research adopt T1:C0123456789:1700000000.000100 --issue 46 --repo chengc
   or posted by an agent (`turn_kind`, usually `reply`).
 - **Clearance (R47.2).** A message clears the stage when it comes from a holder of that stage's
   role and carries a hand-off marker, a mention of a holder of the next role, a link, and a due
-  time written `Due`/`ETA` + `MM-DD HH:MM ET`. On clearance the stage, role and issue assignee
-  move at once and the due time is re-based from the message's own time with the next role's
-  budget. A hand-off with no due time does not clear and is recorded as a finding. A plain
-  progress post never clears, a non-holder never clears, and the arbiter's own posts never clear.
+  time written `Due`/`ETA` + `MM-DD HH:MM ET`. The marker is "handing off" in any of its forms, or
+  "over to" / "passing it to" **naming who receives the work** — "you", a mention, or "the
+  \<role\>". A bare "over to" is ordinary prose ("moving over to section C"), and is not a marker:
+  otherwise a holder's own progress post would clear their stage. On clearance the stage, role and
+  issue assignee move at once and the due time is re-based from the message's own time with the
+  next role's budget. A hand-off with no due time, or with no link, does not clear and is recorded
+  as a finding. A plain progress post never clears, a non-holder never clears, and the arbiter's
+  own posts never clear.
 - **Budgets** come from `[crew_budget]` (explore 4 h, debate 4 h, design audit 2 h, implement
   24 h, code audit 6 h), deliberately apart from `[projection]`, which sizes AI workers.
   `merge` has no default and falls back to `stage_timeout`.

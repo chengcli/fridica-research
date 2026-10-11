@@ -359,3 +359,97 @@ def test_crew_budget_is_parsed_and_kept_apart_from_the_projection_defaults():
     assert arbiter.budget(config.Config(), "Merge") == config.Config().stage_timeout  # no ruled merge budget: the documented fallback
     with pytest.raises(ValueError):
         config.parse('[crew_budget]\naudit = "1h"\n')
+
+
+# -- A3: "over to" is a hand-off only when it names a recipient --------------------------------
+PROGRESS_OVER_TO = f"Moving over to section C now; draft at {LINK} ETA 10-11 14:00 ET"
+
+
+def test_a_holders_own_progress_post_saying_over_to_does_not_clear(world):
+    """The auditor's case: a bare "over to" in ordinary prose must not clear a stage, even from the holder."""
+    server, cfg = world
+    store, calls = adopted(cfg)
+    drv, gh = make(cfg, store, Clock(), calls)
+    server.message(THREAD, EXPLORER, PROGRESS_OVER_TO)
+    drain(drv)
+    r = rnd(store)
+    assert r["stage"] == "Explore"
+    assert own_posts(server) == []
+    assert gh.sets(board_mod.M_SET_OPTION) == [] and gh.argv("gh", "issue", "edit") == []
+    assert r["misses"] == {} and r["findings"] == []
+
+
+@pytest.mark.parametrize("text", [
+    f"<@{DEBATER}> over to you: {LINK} Due 10-11 16:00 ET",
+    f"Explorer report done, over to the debater: {LINK} Due 10-11 16:00 ET",
+    f"Handing off to <@{DEBATER}>: {LINK} Due 10-11 16:00 ET",
+], ids=["over_to_you", "over_to_the_role", "handing_off"])
+def test_the_recipient_forms_of_a_handoff_still_clear(world, text):
+    server, cfg = world
+    store, calls = adopted(cfg)
+    drv, _ = make(cfg, store, Clock(), calls)
+    server.message(THREAD, EXPLORER, text)
+    drain(drv)
+    assert rnd(store)["stage"] == "Debate"
+
+
+# -- a hand-off with a due time but no link ----------------------------------------------------
+def test_handoff_without_a_link_does_not_clear_and_is_recorded(world):
+    server, cfg = world
+    store, calls = adopted(cfg)
+    drv, gh = make(cfg, store, Clock(), calls)
+    server.message(THREAD, EXPLORER, f"Stage: Explore handoff to the debater.\n<@{DEBATER}> over to you.\nDue 10-11 16:00 ET")
+    drain(drv)
+    r = rnd(store)
+    assert r["stage"] == "Explore"
+    assert len(r["findings"]) == 1 and "link" in r["findings"][0]
+    assert own_posts(server) == [] and gh.sets(board_mod.M_SET_OPTION) == []
+
+
+# -- checks that lived in the duplicates of the canonical six ----------------------------------
+def test_an_adopted_round_makes_no_llm_call(world):
+    server, cfg = world
+    store, calls = adopted(cfg)
+    clock = Clock()
+    drv, _ = make(cfg, store, clock, calls)
+    server.message(THREAD, EXPLORER, HANDOFF)
+    server.message(THREAD, DEBATER, "picking it up", kind="reply")
+    drain(drv)
+    clock.t = T0 + 24 * HOUR
+    drv.run_once()
+    assert calls == []
+    assert [p for m, p, _ in server.requests if m == "POST" and (p.endswith("/delegate") or p.endswith("/driver"))] == []
+
+
+def test_a_clean_handoff_produces_no_post(world):
+    """Provision 03.1: the hand-off's own mention is the ping, so the arbiter stays silent."""
+    server, cfg = world
+    store, calls = adopted(cfg)
+    drv, _ = make(cfg, store, Clock(), calls)
+    server.message(THREAD, EXPLORER, HANDOFF)
+    drain(drv)
+    assert rnd(store)["stage"] == "Debate"
+    assert own_posts(server) == [] and rnd(store)["misses"] == {}
+
+
+def test_a_counted_miss_is_fixed_and_then_the_stage_advances(world):
+    server, cfg = world
+    store, calls = adopted(cfg)
+    drv, _ = make(cfg, store, Clock(), calls)
+    server.message(THREAD, EXPLORER, HANDOFF_NO_MENTION)
+    drain(drv)
+    r = rnd(store)
+    assert r["misses"] == {f"Explore/{EXPLORER}": 1}
+    assert len(fixes(server)) == 1
+    assert r["stage"] == "Debate" and r["clearance"]["Explore"]["mention"] is False
+
+
+def test_the_finding_names_the_non_holder(world):
+    server, cfg = world
+    store, calls = adopted(cfg)
+    drv, _ = make(cfg, store, Clock(), calls)
+    server.message(THREAD, STRANGER, HANDOFF)
+    drain(drv)
+    r = rnd(store)
+    assert r["stage"] == "Explore" and len(r["findings"]) == 1
+    assert STRANGER in r["findings"][0] and "explorer" in r["findings"][0]

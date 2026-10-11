@@ -304,12 +304,13 @@ def pr_hygiene_missing(body: str) -> list[str]:
 
 # The study line, the board link and the milestone each on its own line (`pr_body`), or sharing one line
 # ("Study: Slack study thread <ts>, board <url>, milestone R2").
-_MILESTONE = r"(?:^Milestone:|\bmilestone) (R\d+)\b"
+MILESTONE = r"R\d+(?:\.\d+)*"  # a generation milestone, dotted parts and all: R2, R2.1, R10.3.2 (#47)
+_MILESTONE = rf"(?:^Milestone:|\bmilestone) ({MILESTONE})\b"
 _HYGIENE = (("Closes #N", r"^Closes #\d+\s*$"), ("study thread", r"^(?:Study thread: \S+|Study:.*\bstudy thread \S+)"), ("board link", r"(?:^Board:|\bboard) https://github\.com/\S+"), ("milestone", _MILESTONE))
 
 
 def pr_milestone(body: str) -> str:
-    """The generation milestone (`R<n>`) a hygienic PR body names."""
+    """The generation milestone (`R<n>`, dotted parts kept) a hygienic PR body names."""
     return re.search(_MILESTONE, body, re.M | re.I).group(1).upper()
 
 

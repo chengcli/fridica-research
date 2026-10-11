@@ -659,6 +659,17 @@ def test_refuses_to_open_a_pr_without_closes_study_board_milestone():
     assert gh.api("repos/o/r/milestones")[0][1] == {"title": "R2"}  # created on demand
 
 
+def test_a_dotted_milestone_stays_whole():
+    """#47: `R2.1` was truncated to `R2`, by `_MILESTONE` and by `next_pr_body`'s override check."""
+    g, _ = make(FakeGh())
+    for m in ("R2", "R2.1", "R10.3.2"):
+        body = f"Summary.\n\nCloses #21\nStudy thread: T1:C1:1.2\nBoard: https://github.com/users/chengcli/projects/8\nMilestone: {m}\n"
+        assert contracts.pr_hygiene_missing(body) == [] and contracts.pr_milestone(body) == m
+        assert contracts.pr_milestone(body.replace(f"Milestone: {m}", f"Milestone: {m.lower()}")) == m  # still normalised
+        assert f"Milestone: {m}\n" in g.next_pr_body("o/r", "s", 21, "T1:C1:1.2", 9, m)  # the override, not R9
+    assert "Milestone: R9\n" in g.next_pr_body("o/r", "s", 21, "T1:C1:1.2", 9, "R2.")  # a malformed override still falls back
+
+
 def test_pr_under_audit_is_put_on_the_project_and_milestone_once():
     gh = FakeGh((PR, {}))
     g, _ = make(gh)

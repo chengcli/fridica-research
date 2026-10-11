@@ -197,10 +197,10 @@ class GitHub:
     def next_pr_body(self, repo: str, summary: str, closes: int | None, thread: str, generation: int, milestone: str = "") -> str:
         """The R23 body for the next PR to `repo`, with the post-merge items carried from earlier reviews (R24).
 
-        `Milestone:` names `milestone` (the adopted issue's, or the override) when it is `R<n>`, else `R<generation>`."""
+        `Milestone:` names `milestone` (the adopted issue's, or the override) when it is `R<n>` (dotted parts kept, `R2.1`), else `R<generation>`."""
         owner = self.cfg.login_of(self.cfg.owner) or self.cfg.owner or "unassigned"
         names = {"explorer": owner, "debater": owner, "implementer": owner, "auditor": ", ".join([r.login or self.cfg.login_of(r.handle) for r in self.cfg.reviewers]) or "unassigned", "driver and arbitrator": owner}
-        return contracts.pr_body(summary + "\n\n" + roles_table(names), closes, thread, self.board_url(), milestone if re.fullmatch(r"R\d+", milestone) else f"R{generation}", self.carried(repo))
+        return contracts.pr_body(summary + "\n\n" + roles_table(names), closes, thread, self.board_url(), milestone if re.fullmatch(contracts.MILESTONE, milestone) else f"R{generation}", self.carried(repo))
 
     def existing_pr(self, repo: str, head: str) -> str:
         prs = json.loads(self.run(["gh", "pr", "list", "-R", repo, "--head", head, "--state", "open", "--json", "url"], None) or "[]")

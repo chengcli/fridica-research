@@ -1,8 +1,14 @@
-"""#46 slice 1: the arbiter for adopted, people-run rounds (AC1-AC9 of the debate consensus).
+"""#46 slice 1: the guard tests the six canonical RED cases do not cover.
 
-The round state is written the way `adopt` writes it (meta key `round:<thread>`), so every
-behavioural test here runs against the driver and the fake control server, not against a new
-import: at 9856e26 the adopted thread is a study, which is what AC1-AC5 fail on.
+`tests/test_issue46_arbiter.py` holds the auditor's T1-T5 (AC1-AC5) verbatim. The cases here are
+the ones he listed as uncoverable before the arbiter API existed: AC6 (no post asks a person to
+run a command), AC7 (`adopt` refuses AI delegation on a person-held role), the arbiter's own
+echoed posts (A4), the `ref:` restart probe and per-thread adoption (A5), the CodeAudit/Merge
+board stage mapping (A6), and the negative case for A3 -- a progress post with a link and a due
+time but no hand-off marker must not advance the stage. The field-level board writes the driver
+ruled on are pinned here too; T2 only asserts that `Board.sync` is never called.
+
+The round is written the way `adopt` writes it, under the same `round:<thread>` meta key.
 """
 from __future__ import annotations
 
@@ -25,22 +31,18 @@ from fake_control import FakeControl
 from support import CFG, LLM, OWNER
 from test_board import FakeGh
 
-EXPLORER, DEBATER, AUDITOR, IMPLEMENTER, STRANGER = "UEXP", "UDEB", "UAUD", "UIMP", "USTRANGER"
+EXPLORER, DEBATER, AUDITOR, IMPLEMENTER, DRIVER, STRANGER = "UEXP", "UDEB", "UAUD", "UIMP", "UDRV", "USTRANGER"
 T0 = 1_700_000_000.0
 HOUR = 3600.0
 THREAD = "T1:C1:1700000000.000100"
 ISSUE, REPO = 3, "chengcli/fridica-research"
 LINK = "https://github.com/chengcli/fridica-research/issues/46"
 COMMAND = re.compile(r"fridica-research\s+\w+")  # AC6: no arbiter post asks a person to run a command
-BCFG = dataclasses.replace(CFG, board=BoardCfg(enabled=True, owner="chengcli", number=8, repo=REPO))
 
 HANDOFF = f"Stage: Explore handoff to the debater.\n<@{DEBATER}> the explorer report is in.\n{LINK}\nDue 10-11 16:00 ET"
 HANDOFF_NO_MENTION = f"Stage: Explore handoff to the debater.\n{LINK}\nDue 10-11 16:00 ET"
 HANDOFF_NO_DUE = f"Stage: Explore handoff to the debater.\n<@{DEBATER}> take it.\n{LINK}"
 PROGRESS = f"Still reading the inventory, <@{DEBATER}> for visibility.\n{LINK}\nDue 10-11 16:00 ET"
-
-
-def root_text(text="Study the thing", hours=4): return f"{text}\n\nprojected: {hours} h\ngeneration: 1\nlineage: origin\nref: start"
 
 
 def round_meta(stage: str = "Explore", now: float = T0, **kw) -> str:
@@ -53,6 +55,7 @@ def round_meta(stage: str = "Explore", now: float = T0, **kw) -> str:
             "debater": {"holders": [DEBATER], "login": "deb", "delegate": False},
             "auditor": {"holders": [AUDITOR], "login": "aud", "delegate": False},
             "implementer": {"holders": [IMPLEMENTER], "login": "imp", "delegate": False},
+            "driver": {"holders": [DRIVER], "login": "drv", "delegate": False},
         },
     }
     r.update(kw)
@@ -66,8 +69,10 @@ class Clock:
 
 @pytest.fixture
 def world(tmp_path, sock_dir):
-    server = FakeControl(os.path.join(sock_dir, "c.sock"), owner=OWNER).start()
-    cfg = dataclasses.replace(BCFG, socket=os.path.join(sock_dir, "c.sock"), state_path=str(tmp_path / "state.sqlite3"))
+    sock = os.path.join(sock_dir, "c.sock")
+    server = FakeControl(sock, owner=OWNER).start()
+    cfg = dataclasses.replace(CFG, socket=sock, state_path=str(tmp_path / "state.sqlite3"),
+                              board=BoardCfg(enabled=True, owner="chengcli", number=8, repo=REPO))
     yield server, cfg
     server.stop()
 
@@ -83,7 +88,7 @@ def adopted(cfg: Config, meta: str | None = None) -> tuple[Store, list[str]]:
 def make(cfg: Config, store: Store, clock: Clock, calls: list[str], gh: FakeGh | None = None) -> tuple[Driver, FakeGh]:
     gh = gh or FakeGh()
     board = Board(cfg, runner=gh, remember=store.set_meta, recall=store.get_meta)
-    llm = lambda name, prompt: (calls.append(name), LLM[name])[1]  # noqa: E731 - AC1 counts LLM calls
+    llm = lambda name, prompt: (calls.append(name), LLM[name])[1]  # noqa: E731 - an adopted round makes no LLM call
     return Driver(cfg, Client(cfg.socket_path), store, llm=llm, board=board, clock=clock, sleep=lambda s: None), gh
 
 
@@ -96,57 +101,11 @@ def drain(drv: Driver, limit: int = 10):
 
 def rnd(store: Store) -> dict: return json.loads(store.get_meta(f"round:{THREAD}") or "{}")
 def own_posts(server: FakeControl) -> list[str]: return [m["text"] for m in server.view(THREAD)["messages"] if m["sender"] == OWNER and m["ts"] != THREAD.rsplit(":", 1)[1]]
-def posts(server: FakeControl) -> list[dict]: return [b for m, p, b in server.requests if m == "POST" and p.endswith("/post")]
+def options(gh: FakeGh) -> dict: return {v["field"]: v["v"] for v in gh.sets(board_mod.M_SET_OPTION)}
 
 
-# -- T1 / AC1: an adopted thread never becomes an AI study --------------------------------
-def test_adopted_round_never_delegates(world):
-    server, cfg = world
-    store, calls = adopted(cfg)
-    clock = Clock()
-    drv, _ = make(cfg, store, clock, calls)
-    server.root(THREAD, OWNER, root_text())
-    server.message(THREAD, EXPLORER, "reading the inventory now")
-    server.message(THREAD, DEBATER, "acknowledged", kind="reply")
-    drain(drv)
-    for t in (T0 + 30 * 60, T0 + 24 * HOUR):
-        clock.t = t
-        drv.run_once()
-    paths = [p for m, p, _ in server.requests if m == "POST"]
-    assert [p for p in paths if p.endswith("/delegate")] == []
-    assert [p for p in paths if p.endswith("/driver")] == []
-    assert calls == []
-    assert store.load(THREAD) is None  # no study state was ever written for an adopted thread
-
-
-# -- T2 / AC2: a plain hand-off clears the stage at once ----------------------------------
-def test_plain_handoff_advances(world):
-    server, cfg = world
-    store, calls = adopted(cfg)
-    drv, gh = make(cfg, store, Clock(), calls)
-    server.message(THREAD, EXPLORER, HANDOFF)
-    drain(drv)
-    r = rnd(store)
-    assert r["stage"] == "Debate"
-    assert r["due"] == pytest.approx(T0 + 4 * HOUR)  # re-based from the event's now with the debate budget
-    options = {v["field"]: v["v"] for v in gh.sets(board_mod.M_SET_OPTION)}
-    assert options["F_stage"] == "O_Debate" and options["F_role"] == "R_debater"
-    edits = gh.argv("gh", "issue", "edit")
-    assert any("--add-assignee" in a and "deb" in a for a in edits)
-    assert not any("--body" in a for a in edits)  # field-level only: #49 stays out
-    assert own_posts(server) == []  # the hand-off carried the mention, so the arbiter says nothing
-
-
-def test_agent_reply_handoff_advances(world):
-    server, cfg = world
-    store, calls = adopted(cfg)
-    drv, _ = make(cfg, store, Clock(), calls)
-    server.message(THREAD, EXPLORER, HANDOFF, kind="reply")
-    drain(drv)
-    assert rnd(store)["stage"] == "Debate"
-
-
-def test_progress_post_without_marker_does_not_advance(world):
+# -- A3 (negative): a hand-off marker is required -------------------------------------------
+def test_progress_with_link_and_due_but_no_marker_does_not_advance(world):
     server, cfg = world
     store, calls = adopted(cfg)
     drv, _ = make(cfg, store, Clock(), calls)
@@ -168,37 +127,7 @@ def test_handoff_without_due_does_not_clear_and_is_recorded(world):
     assert r["stage"] == "Explore" and len(r["findings"]) == 1
 
 
-# -- T3 / AC3: the missing mention is fixed exactly once ----------------------------------
-def test_missing_mention_fixed_once(world):
-    server, cfg = world
-    store, calls = adopted(cfg)
-    drv, _ = make(cfg, store, Clock(), calls)
-    ts = "1700000000.000200"
-    server.message(THREAD, EXPLORER, HANDOFF_NO_MENTION, ts=ts)
-    drain(drv)
-    server.message(THREAD, EXPLORER, HANDOFF_NO_MENTION, ts=ts)  # the same event again
-    drain(drv)
-    fixes = [t for t in own_posts(server) if f"<@{DEBATER}>" in t]
-    assert len(fixes) == 1
-    assert LINK in fixes[0] and "ET" in fixes[0] and re.search(r"^ref: \S+$", fixes[0], re.M)
-    r = rnd(store)
-    assert r["misses"] == {f"Explore/{EXPLORER}": 1}
-    assert r["stage"] == "Debate"  # the arbiter fixed the mention, so the round still advances
-
-
-# -- T4 / AC4: only the holder of the stage's role can clear it ---------------------------
-def test_non_holder_cannot_clear(world):
-    server, cfg = world
-    store, calls = adopted(cfg)
-    drv, _ = make(cfg, store, Clock(), calls)
-    server.message(THREAD, STRANGER, HANDOFF)
-    drain(drv)
-    r = rnd(store)
-    assert r["stage"] == "Explore"
-    assert len(r["findings"]) == 1 and STRANGER in r["findings"][0]
-    assert own_posts(server) == []
-
-
+# -- A4: the arbiter's own echoed posts never clear a stage ---------------------------------
 def test_own_echo_never_clears(world):
     server, cfg = world
     store, calls = adopted(cfg)
@@ -210,26 +139,39 @@ def test_own_echo_never_clears(world):
     assert r["seen"] == [ts] and r["stage"] == "Explore"
 
 
-# -- T5 / AC5: no clock-driven closure of any kind ----------------------------------------
-def test_no_clock_closure(world):
+# -- A2: board writes are field-level, and A6: CodeAudit/Merge map onto the board's options --
+def test_board_writes_are_field_level_and_never_touch_the_body(world):
     server, cfg = world
     store, calls = adopted(cfg)
-    clock = Clock()
-    drv, _ = make(cfg, store, clock, calls)
-    server.root(THREAD, OWNER, root_text())
-    server.message(THREAD, EXPLORER, "still working")
+    drv, gh = make(cfg, store, Clock(), calls)
+    server.message(THREAD, EXPLORER, HANDOFF)
     drain(drv)
-    for t in (T0 + 20 * 60, T0 + 23 * 60, T0 + 72 * HOUR):
-        clock.t = t
-        drv.run_once()
-    r = rnd(store)
-    assert r["stage"] == "Explore"
-    assert posts(server) == []
-    assert [p for m, p, _ in server.requests if p.endswith("/stop")] == []
-    assert store.load(THREAD) is None
+    opts = options(gh)
+    assert opts["F_stage"] == "O_Debate" and opts["F_role"] == "R_debater" and opts["F_status"] == "S_In Progress"
+    edits = gh.argv("gh", "issue", "edit")
+    assert any("--add-assignee" in a and "deb" in a for a in edits)
+    assert any("--remove-assignee" in a and "exp" in a for a in edits)
+    assert not any("--body" in a for a in edits)  # the issue body belongs to #49, never to the arbiter
+    assert gh.sets(board_mod.M_SET_DATE)  # Started and Projected finish are written
+    assert not any(a[:3] == ["gh", "issue", "comment"] for a in gh.argv("gh", "issue"))
 
 
-# -- T6 / AC6: no arbiter post ever asks a person to run a command ------------------------
+@pytest.mark.parametrize("stage, holder, nxt, mention, stage_option, role_option", [
+    ("Implement", IMPLEMENTER, "CodeAudit", AUDITOR, "O_Audit", "R_auditor"),
+    ("CodeAudit", AUDITOR, "Merge", DRIVER, "O_Deliver", "R_driver"),
+])
+def test_code_audit_and_merge_map_onto_the_boards_stage_options(world, stage, holder, nxt, mention, stage_option, role_option):
+    """The board's Stage field has no CodeAudit or Merge option (board.STAGE_OPTIONS), so they map onto Audit and Deliver."""
+    server, cfg = world
+    store, calls = adopted(cfg, round_meta(stage=stage))
+    drv, gh = make(cfg, store, Clock(), calls)
+    server.message(THREAD, holder, f"Handoff to {nxt}: <@{mention}> over to you.\n{LINK}\nDue 10-12 09:00 ET")
+    drain(drv)
+    assert rnd(store)["stage"] == nxt
+    assert options(gh)["F_stage"] == stage_option and options(gh)["F_role"] == role_option
+
+
+# -- AC6: no arbiter post ever asks a person to run a command -------------------------------
 def test_no_command_text(world):
     server, cfg = world
     store, calls = adopted(cfg)
@@ -264,13 +206,14 @@ def test_the_driver_refuses_to_execute_a_foreign_action_for_a_round(world):
     server, cfg = world
     store, calls = adopted(cfg)
     drv, _ = make(cfg, store, Clock(), calls)
-    rnd = drv.load_round(THREAD)
+    rd = drv.load_round(THREAD)
     with pytest.raises(ValueError):
-        drv.execute_round(rnd, Action("delegate", "x", {"role": "explorer"}))
-    assert drv.execute_round(rnd, Action("notify_owner", f"{THREAD}/round/escalate", {"text": "owner-only question"})) is None
+        drv.execute_round(rd, Action("delegate", "x", {"role": "explorer"}))
+    assert drv.execute_round(rd, Action("notify_owner", f"{THREAD}/round/escalate", {"text": "owner-only question"})) is None
     assert own_posts(server) == [f"<@{OWNER}> owner-only question\nref: {THREAD}/round/escalate"]
 
 
+# -- A5: the `ref:` restart probe and per-thread adoption -----------------------------------
 def test_a_restart_does_not_post_the_fix_twice(world):
     """The `ref:` probe, not only the fold: a round rolled back to before the post must not post again."""
     server, cfg = world
@@ -285,7 +228,7 @@ def test_a_restart_does_not_post_the_fix_twice(world):
     assert len([t for t in own_posts(server) if f"<@{DEBATER}>" in t]) == 1
 
 
-# -- T7 / AC7: the roster validator (guard test: argparse-only at the base sha) ------------
+# -- AC7: the roster validator --------------------------------------------------------------
 def config_file(tmp_path, cfg: Config) -> str:
     p = tmp_path / "research.toml"
     p.write_text(f'state_path = "{cfg.state_file}"\nchannels = ["C1"]\n\n[fridica]\nowner = "{OWNER}"\nsocket = "{cfg.socket}"\n')
@@ -300,8 +243,7 @@ def adopt_argv(tmp_path, cfg, *extra: str) -> list[str]:
 def test_adopt_rejects_delegate_on_person_role(tmp_path, world):
     _, cfg = world
     assert main(adopt_argv(tmp_path, cfg, "--delegate", "explorer")) == 1
-    store = Store(cfg.state_file)
-    assert store.get_meta(f"round:{THREAD}") is None
+    assert Store(cfg.state_file).get_meta(f"round:{THREAD}") is None
 
 
 def test_adopt_rejects_the_owner_as_a_holder(tmp_path, world):

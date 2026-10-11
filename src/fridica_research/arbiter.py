@@ -48,7 +48,10 @@ BUDGET_KEY = {"Explore": "explore", "Debate": "debate", "DesignAudit": "design_a
 ACTION_KINDS = ("post", "notify_owner", "board_update")  # the arbiter emits nothing else: no delegate, set_driver, llm_call, stop_worker or arm_timer
 SEEN_KEEP = 200  # message timestamps kept for the re-feed check
 
-HANDOFF_MARK = re.compile(r"hand[-\s]?off", re.I)  # required: a plain progress post never clears a stage
+# A hand-off marker is required, so a plain progress post never clears a stage (design audit A3). The
+# crew writes hand-offs both ways, "handing off" and "over to <holder>", so both forms count. The marker
+# alone never clears: the author must hold the stage's role and the post must carry a link and a due time.
+HANDOFF_MARK = re.compile(r"hand[-\s]?off|hand(?:s|ed|ing)[-\s]+(?:it |this )?(?:off|over)|\bover to\b|\bpass(?:ing|es|ed)?[-\s]+(?:it|this)[-\s]+(?:on[-\s]+)?to\b|\ball yours\b", re.I)
 MENTION = re.compile(r"<@([UW][A-Z0-9]+)>")
 LINK = re.compile(r"https://[^\s<>|)\]]+")
 DUE = re.compile(r"\b(?:due|eta)\b[^\n]{0,40}?(?P<when>\d{1,2}-\d{1,2}\s+\d{1,2}:\d{2}\s*(?:ET|EST|EDT))", re.I)

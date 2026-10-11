@@ -405,6 +405,9 @@ class M:
             s.iteration, s.round, s.claim, s.approaches, s.reports, s.synthesis = s.iteration + 1, 0, None, [], {}, {}
             s.consensus, s.audited_consensus, s.design_return = "", "", ""
             s.synthesis_overrun = False
+            if s.stage == "Explore":  # rolling over from Explore itself: `set_stage` won't run, so open this iteration's row here (#50),
+                self.close_row()      # otherwise `arm_overrun` would deadline the new round off the old one's start
+                s.stage_log.append(self.row("Explore"))
             self.enter("Explore")
         else:
             s.partial = True

@@ -545,3 +545,19 @@ def test_signoff_cannot_close_scope_for_unknown_head_or_wrong_repository():
         w.ev("sign_off", sender=REV, pr=wrong_pr, sha=SHA, verdict="approve")
         assert w.state.audit_scopes["scope"]["signed_at"] is None
         assert w.state.stage == "Audit"
+
+
+def test_each_explore_round_gets_its_own_overrun_budget():
+    """#50: after the first round overruns, rounds 2 and 3 keep their own 2x budget instead of ending on the next timer check."""
+    p = CFG.projection["explore"]
+    w = World(cfg=dataclasses.replace(CFG, max_iterations=3, stage_timeout=10 * p))  # the overrun (2x) comes before the stage timer
+    w.start()
+    for i in (1, 2, 3):
+        row = w.state.stage_log[-1]
+        assert w.state.iteration == i and w.state.stage == "Explore" and row["stage"] == "Explore" and row["iteration"] == i and row["start"] == w.now
+        assert w.state.timers[f"{THREAD}/g1/i{i}/Explore/overrun"] == row["start"] + 2 * p
+        w.tick(2 * p - 60)  # just inside this round's own budget: it must not be interrupted
+        assert w.state.iteration == i and w.state.stage == "Explore"
+        w.tick(60)  # this round reaches 2x its projection and hands over to the next
+    assert w.state.partial is True and w.state.stage == "Delivered"
+    assert [f"iteration {i} Explore interrupted after 40 min" in f for i, f in enumerate(w.state.findings, start=1)] == [True, True, True]

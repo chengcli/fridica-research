@@ -181,10 +181,21 @@ def provenance_revisions():
     return w
 
 
+def explore_overrun_cascade():
+    """#50: the first explore round overruns; rounds 2 and 3 each get their own 2x budget, then the study delivers partial."""
+    p = CFG.projection["explore"]
+    w = World(cfg=dataclasses.replace(CFG, max_iterations=3, stage_timeout=10 * p))
+    w.start()
+    for _ in range(3):
+        w.tick(2 * p)
+    return w
+
+
 SCENARIOS = {
     "000_bootstrap": bootstrap, "001_simple_research": simple_research, "002_debate_disagreement": debate_disagreement, "003_auditor_return": auditor_return,
     "004_worker_failure": worker_failure, "005_timeout_retry": timeout_retry, "006_peer_claim_conflict": peer_claim_conflict, "007_partial_delivery": partial_delivery,
     "008_changes_then_timeout": changes_then_timeout, "009_refused_reviewer": refused_reviewer, "010_refused_reviewer_retry": refused_reviewer_retry, "011_debate_adds_lens": debate_adds_lens, "012_final_round_evidence": final_round_evidence, "013_provenance_revisions": provenance_revisions,
+    "014_explore_overrun_cascade": explore_overrun_cascade,
 }
 
 

@@ -260,3 +260,102 @@ def test_adopt_writes_a_round_per_thread(tmp_path, world):
     assert r["stage"] == "Explore" and r["issue"] == ISSUE and r["roster"]["debater"]["holders"] == [DEBATER]
     assert store.get_meta("round:T1:C1:1700000000.000999") is None  # adoption is keyed per thread, never per channel
     assert main(adopt_argv(tmp_path, cfg)) == 1  # already adopted
+
+
+# -- A5, restart half: a fix post is never lost ---------------------------------------------
+def crash_the_client(drv: Driver, why: str = "the process died before the send"):
+    """A send that never completes, as a process dying between the round's save and the post would."""
+    def boom(*a, **kw): raise RuntimeError(why)
+    drv.client.post_message = boom
+
+
+def fixes(server: FakeControl) -> list[str]: return [t for t in own_posts(server) if f"<@{DEBATER}>" in t]
+
+
+def test_a_crash_before_the_send_does_not_lose_the_fix_post(world):
+    server, cfg = world
+    store, calls = adopted(cfg)
+    drv, _ = make(cfg, store, Clock(), calls)
+    crash_the_client(drv)
+    server.message(THREAD, EXPLORER, HANDOFF_NO_MENTION, ts="1700000000.000600")
+    with pytest.raises(RuntimeError):
+        drain(drv)
+    assert rnd(store)["stage"] == "Debate" and fixes(server) == []  # the stage moved, the post did not go out
+    drv2, _ = make(cfg, store, Clock(), calls)  # restart over the same store and the same feed
+    drain(drv2)
+    assert len(fixes(server)) == 1
+    assert rnd(store)["pending"] == []
+
+
+def test_a_refused_fix_post_is_re_sent_on_the_next_pass(world):
+    server, cfg = world
+    store, calls = adopted(cfg)
+    drv, _ = make(cfg, store, Clock(), calls)
+    server.refuse_post = [(503, "daemon_unavailable")]
+    server.message(THREAD, EXPLORER, HANDOFF_NO_MENTION, ts="1700000000.000700")
+    drain(drv)
+    assert len(fixes(server)) == 1
+    assert rnd(store)["pending"] == []
+
+
+def test_a_re_emitted_fix_post_does_not_post_twice(world):
+    """The durable intent and the `ref:` probe together: a crash after the send must not post again."""
+    server, cfg = world
+    store, calls = adopted(cfg)
+    drv, _ = make(cfg, store, Clock(), calls)
+    server.refuse_post = [(503, "daemon_unavailable")]
+    server.message(THREAD, EXPLORER, HANDOFF_NO_MENTION, ts="1700000000.000800")
+    drv.run_once()
+    held = rnd(store)["pending"]
+    assert len(held) == 1 and fixes(server) == []  # refused once: the intent is still on the round
+    drain(drv)
+    assert len(fixes(server)) == 1
+    r = rnd(store)
+    r["pending"] = held  # as a crash between the successful send and the clear would leave it
+    store.set_meta(f"round:{THREAD}", json.dumps(r))
+    drain(drv)
+    assert len(fixes(server)) == 1 and rnd(store)["pending"] == []
+
+
+# -- a stage whose next role has nobody in the roster ----------------------------------------
+def test_clearing_into_an_unheld_role_makes_no_holder_unset_post(world):
+    server, cfg = world
+    roster = json.loads(round_meta())["roster"]
+    roster.pop("driver")
+    store, calls = adopted(cfg, round_meta(stage="CodeAudit", roster=roster))
+    drv, _ = make(cfg, store, Clock(), calls)
+    server.message(THREAD, AUDITOR, f"Code audit done, handoff: {LINK}\nDue 10-12 09:00 ET")
+    drain(drv)
+    r = rnd(store)
+    assert r["stage"] == "Merge"
+    assert own_posts(server) == []  # nobody to mention: a post reading "(holder unset)" helps no one
+    assert len(r["findings"]) == 1 and "driver" in r["findings"][0]
+    assert r["misses"] == {}  # a roster gap is not the author's miss
+
+
+# -- two rounds in one channel are independent ------------------------------------------------
+def test_two_rounds_in_one_channel_do_not_interfere(world):
+    server, cfg = world
+    other = "T1:C1:1700000000.000900"
+    store, calls = adopted(cfg)
+    store.set_meta(f"round:{other}", round_meta().replace(THREAD, other))
+    drv, _ = make(cfg, store, Clock(), calls)
+    server.message(THREAD, EXPLORER, HANDOFF)
+    drain(drv)
+    assert rnd(store)["stage"] == "Debate"
+    assert json.loads(store.get_meta(f"round:{other}"))["stage"] == "Explore"
+    assert store.load(THREAD) is None and store.load(other) is None
+    assert sorted(store.rounds()) == sorted([THREAD, other])
+
+
+# -- [crew_budget] parsing ---------------------------------------------------------------------
+def test_crew_budget_is_parsed_and_kept_apart_from_the_projection_defaults():
+    from fridica_research import arbiter, config
+    cfg = config.parse('[crew_budget]\nexplore = "6h"\ncode_audit = 900\nmerge = "30m"\n\n[projection]\nexplore = "10m"\n')
+    assert cfg.crew_budget["explore"] == 6 * 3600 and cfg.crew_budget["code_audit"] == 900 and cfg.crew_budget["merge"] == 1800
+    assert cfg.crew_budget["implement"] == 24 * 3600 and cfg.crew_budget["debate"] == 4 * 3600  # the ruled defaults stay
+    assert cfg.projection["explore"] == 600  # the AI projection is untouched by the crew budget
+    assert arbiter.budget(cfg, "Explore") == 6 * 3600 and arbiter.budget(cfg, "Merge") == 1800
+    assert arbiter.budget(config.Config(), "Merge") == config.Config().stage_timeout  # no ruled merge budget: the documented fallback
+    with pytest.raises(ValueError):
+        config.parse('[crew_budget]\naudit = "1h"\n')

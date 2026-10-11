@@ -46,6 +46,7 @@ ROUND_ROLE = {"Explore": "explorer", "Debate": "debater", "DesignAudit": "audito
 BOARD_STAGE = {"CodeAudit": "Audit", "Merge": "Deliver"}  # the board's Stage options have no CodeAudit or Merge (board.STAGE_OPTIONS)
 BUDGET_KEY = {"Explore": "explore", "Debate": "debate", "DesignAudit": "design_audit", "Implement": "implement", "CodeAudit": "code_audit", "Merge": "merge"}
 ACTION_KINDS = ("post", "notify_owner", "board_update")  # the arbiter emits nothing else: no delegate, set_driver, llm_call, stop_worker or arm_timer
+DURABLE = ("post", "notify_owner")  # kinds the fold records in `Round.pending`: losing one loses the record, so they are re-emitted until the daemon takes them
 SEEN_KEEP = 200  # message timestamps kept for the re-feed check
 
 # A hand-off marker is required, so a plain progress post never clears a stage (design audit A3). The
@@ -119,6 +120,7 @@ class Round:
     findings: list[str] = field(default_factory=list)
     posted_refs: list[str] = field(default_factory=list)
     seen: list[str] = field(default_factory=list)
+    pending: list[dict] = field(default_factory=list)  # durable actions the daemon has not taken yet; cleared only on a successful send
     pr: dict = field(default_factory=dict)  # slice 2
 
     def holders(self, role: str) -> list[str]: return list((self.roster.get(role) or {}).get("holders") or [])
@@ -210,9 +212,14 @@ def observe(rnd: Round, ev: Event, cfg: Config) -> tuple[Round, list[Action]]:
 
     actions: list[Action] = []
     mentioned = set(MENTION.findall(text))
-    has_mention = bool(mentioned & set(r.holders(nrole)))
+    next_holders = r.holders(nrole)
+    has_mention = bool(mentioned & set(next_holders))
     rebased = ev.now + budget(cfg, nxt)
-    if not has_mention:  # G7a: the one fix, once per (stage, author), and the only mention the arbiter posts
+    if not has_mention and not next_holders:
+        # Nobody holds the next role, so there is no mention to add: a post naming no one helps no one.
+        # That is a gap in the roster the driver adopted with, not a miss by the hand-off's author.
+        r.findings.append(f"{nxt}: no {nrole} in the roster, so the hand-off's missing mention cannot be added")
+    elif not has_mention:  # G7a: the one fix, once per (stage, author), and the only mention the arbiter posts
         key = f"{stage}/{sender}"
         r.misses[key] = r.misses.get(key, 0) + 1
         ref = f"{r.thread}/round/{stage}/mention/{sender}"
@@ -224,6 +231,9 @@ def observe(rnd: Round, ev: Event, cfg: Config) -> tuple[Round, list[Action]]:
     r.stage, r.stage_started, r.due = nxt, ev.now, rebased
     board = board_action(r, stage, nxt, nrole, ts, cfg)
     if board is not None: actions.append(board)
+    # A5, restart half: what must reach the thread is recorded on the round before the driver sends anything,
+    # so a crash between the save and the send, or a post the daemon refuses, is re-emitted rather than lost.
+    r.pending = r.pending + [a.to_dict() for a in actions if a.kind in DURABLE]
     return r, actions
 
 
@@ -251,6 +261,11 @@ def board_action(r: Round, stage: str, nxt: str, nrole: str, ts: str, cfg: Confi
         "assignee": assignee,
         "remove_assignees": [previous] if previous and previous != assignee else [],
     })
+
+
+def action_from_dict(d: dict) -> Action:
+    """The inverse of `Action.to_dict` for a pending action read back from the round."""
+    return Action(d["kind"], d["id"], {k: v for k, v in d.items() if k not in ("kind", "id")})
 
 
 def _ref_of(text: str) -> str:

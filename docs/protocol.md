@@ -549,6 +549,13 @@ fridica-research adopt T1:C0123456789:1700000000.000100 --issue 46 --repo chengc
 - **Idempotence.** Every arbiter post carries a deterministic `ref:` line; the driver probes the
   thread by that `ref:` before posting, as `recover` does, and the fold ignores a message
   timestamp it has already folded. Re-feeding an event posts nothing and advances nothing.
+- **Durability.** A post the arbiter owes the thread is recorded on the round (`pending`) and the
+  round is saved before anything is sent; the entry is cleared only once the daemon has taken the
+  post. Every pass re-emits what is still pending, so a crash between the save and the send, and a
+  post the daemon refuses, are retried rather than lost while the stage has already moved. The
+  `ref:` probe is what keeps a post that did go out from being sent a second time. A post that is
+  refused indefinitely is retried indefinitely; capping that belongs with the ETA ladder, which is
+  where escalation lives.
 
 Later slices, tracked on #46: PR adoption and polling, the ETA ladder and off-role reminders,
 merge with the next queued root, and the per-role AI opt-in.

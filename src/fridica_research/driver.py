@@ -238,18 +238,37 @@ class Driver:
         ev = round_event(e, self.clock())
         if ev is None: return True
         rnd, actions = arbiter.observe(rnd, ev, self.cfg)
-        self.save_round(rnd)
+        self.save_round(rnd)  # the intent is durable before anything is sent: `pending` carries what must reach the thread
+        self.drain_pending(rnd)
         for a in actions:
-            log.info("%s %s %s", rnd.thread, a.kind, a.id)
-            finding = self.execute_round(rnd, a)
-            if finding:
-                rnd.findings.append(finding)
-                self.save_round(rnd)
+            if a.kind in arbiter.DURABLE: continue  # sent by drain_pending, which clears it only once the daemon took it
+            self.execute_round(rnd, a)
         return True
 
+    def flush_rounds(self):
+        """Re-emit what an adopted round still has pending. Called on every pass, so a restart, a crash between
+        the round's save and the send, and a post the daemon refused are all retried rather than lost (A5)."""
+        for thread in self.store.rounds():
+            rnd = self.load_round(thread)
+            if rnd is not None and rnd.pending: self.drain_pending(rnd)
+
+    def drain_pending(self, rnd: arbiter.Round):
+        """Send the round's pending actions; an action leaves `pending` only when the send succeeded.
+
+        A refused action stays for the next pass. A hard failure propagates without saving, so nothing is
+        dropped. The `ref:` probe in `execute_round` keeps a post that did go out from being sent twice."""
+        kept = [d for d in rnd.pending if self.execute_round(rnd, arbiter.action_from_dict(d))]
+        if kept != rnd.pending:
+            rnd.pending = kept
+            self.save_round(rnd)
+
     def execute_round(self, rnd: arbiter.Round, a: Action) -> str | None:
-        """Execute one arbiter action through the existing primitives; returns a finding when it could not be done."""
+        """Execute one arbiter action through the existing primitives.
+
+        Returns None when the action is done with (sent, or already in the thread by its `ref:`), and the
+        refusal when the daemon would not take it, which keeps a durable action pending for the next pass."""
         if a.kind not in arbiter.ACTION_KINDS: raise ValueError(f"the arbiter may not emit {a.kind}")
+        log.info("%s %s %s", rnd.thread, a.kind, a.id)
         try:
             if a.kind == "post":
                 if self.posted_with_ref(rnd.thread, a.id): return None  # restart: the post is already in the thread
@@ -303,6 +322,7 @@ class Driver:
         """Commands, one page of the feed, due timers. Returns (feed events applied, page reached the ledger's end)."""
         if not self.recovered: self.recover()
         self.commands()
+        self.flush_rounds()
         try: page = self.client.events(self.store.cursor, 1000)
         except Unavailable as e:
             log.warning("daemon unavailable: %s", e)

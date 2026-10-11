@@ -211,11 +211,18 @@ class Projects:
         m = re.search(r"#issuecomment-(\d+)", url)
         return int(m.group(1)) if m else None
 
+    def login(self) -> str:
+        """The token's own account (`gh api user`), read once: the author of every comment the driver posts."""
+        if not getattr(self, "_login", None): self._login = json.loads(self.run(["gh", "api", "user"], None))["login"]
+        return self._login
+
     def find_comment(self, number: int, marker: str) -> int | None:
-        """The id of the issue's oldest comment containing `marker` (REST, every page), or None."""
+        """The id of the issue's oldest comment by the driver's own login whose text has `marker` followed by ` (`
+        (so study T:1 never matches T:10), from REST, every page; or None."""
         from .github import json_values  # github imports this module
         pages = json_values(self.run(["gh", "api", "--paginate", f"repos/{self.b.repo}/issues/{number}/comments?per_page=100"], None))
-        ids = [int(c["id"]) for page in pages for c in (page if isinstance(page, list) else [page]) if marker in (c.get("body") or "")]
+        me = self.login().lower()
+        ids = [int(c["id"]) for page in pages for c in (page if isinstance(page, list) else [page]) if marker + " (" in (c.get("body") or "") and str((c.get("user") or {}).get("login", "")).lower() == me]
         return min(ids) if ids else None
 
     def update_comment(self, comment_id: int, body: str): self.run(["gh", "api", "-X", "PATCH", f"repos/{self.b.repo}/issues/comments/{comment_id}", "--input", "-"], json.dumps({"body": body}))
@@ -344,19 +351,30 @@ class Board:
 
     def sync_comment(self, state: State, n: int, cards: dict):
         """Post the adoption comment once, store its id, PATCH it when the text changes. A legacy card (`commented`, no id)
-        first looks the comment up by its marker; a new comment is posted only when none is found."""
+        and a PATCH that 404s (the comment was deleted) look the driver's own marker comment up; a new comment is posted
+        only when none is found."""
         text = self.adoption_comment(state, n, cards)
         digest = hashlib.sha256(text.encode()).hexdigest()
+        if cards.get("comment_id") is not None and cards.get("comment_sha") != digest:
+            try:
+                self.api.update_comment(cards["comment_id"], text)
+                cards["comment_sha"] = digest
+                return
+            except RuntimeError as e:
+                if "HTTP 404" not in str(e): raise
+                log.warning("adoption comment %s on #%s is gone (404); looking it up again", cards["comment_id"], n)
+                cards["comment_id"], cards["comment_sha"] = None, None  # the stale id never 404s again
         if cards.get("comment_id") is None and cards.get("commented"):
             cards["comment_id"] = self.api.find_comment(n, self.adoption_marker(state))
             if cards["comment_id"] is None: cards["commented"] = False
+            else:
+                self.api.update_comment(cards["comment_id"], text)
+                cards["comment_sha"] = digest
+                return
         if cards.get("comment_id") is None:
             cid = self.api.comment_issue(n, text)
             cards["commented"], cards["comment_id"], cards["comment_sha"] = True, cid if cid is not None else self.api.find_comment(n, self.adoption_marker(state)), digest
             self.remember(f"board:{state.thread}", json.dumps(cards))  # recorded at once: a later failure in this sync must not lose the id
-        elif cards.get("comment_sha") != digest:
-            self.api.update_comment(cards["comment_id"], text)
-            cards["comment_sha"] = digest
 
     def sync_study(self, state: State, cards: dict):
         owner_login = self.login(self.cfg.owner, state)

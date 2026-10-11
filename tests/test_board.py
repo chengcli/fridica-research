@@ -46,6 +46,8 @@ class FakeGh:
             return f"https://github.com/{argv[4]}/issues/{self.issues}\n"
         if argv[:3] == ["gh", "issue", "comment"]:  # gh prints the new comment's URL
             return self.add_comment(argv[argv.index("-R") + 1], int(argv[3]), argv[argv.index("--body") + 1], self.login)["html_url"] + "\n"
+        if argv[:3] == ["gh", "api", "user"]:  # the token's account (REST `GET /user`, abridged)
+            return json.dumps({"login": self.login, "id": 1, "type": "User"})
         if argv[:2] == ["gh", "api"] and "/comments" in " ".join(argv):
             return self.rest_comments(argv, doc)
         if argv[:3] == ["gh", "project", "field-create"]:
@@ -54,7 +56,8 @@ class FakeGh:
         return ""
 
     def add_comment(self, repo: str, issue: int, body: str, login: str) -> dict:
-        cid = 3_000_000_001 + sum(len(c) for c in self.comments.values())
+        self.comment_ids = getattr(self, "comment_ids", 0) + 1  # GitHub never reuses an id, also after a delete
+        cid = 3_000_000_000 + self.comment_ids
         c = {"id": cid, "node_id": f"IC_{cid}", "html_url": f"https://github.com/{repo}/issues/{issue}#issuecomment-{cid}", "body": body, "user": {"login": login, "type": "User"}}
         self.comments.setdefault(issue, []).append(c)
         return c

@@ -15,6 +15,13 @@
   "channels": [
    "C0C2D3PCW20"
   ],
+  "crew_budget": {
+   "code_audit": 21600,
+   "debate": 14400,
+   "design_audit": 7200,
+   "explore": 14400,
+   "implement": 86400
+  },
   "default_projected_hours": 4.0,
   "github": {
    "ack_backoff": 600.0,

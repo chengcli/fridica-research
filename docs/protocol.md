@@ -504,3 +504,51 @@ owner/repository identity; unqualified `#N` is bound to this study’s known PR.
 is [fridica view.rs, lines 95–145](https://github.com/chengcli/fridica/blob/fefd4c3fe214f2a9d8bcd114e5238c3518696714/src/github/view.rs#L95-L145);
 this reference is guidance, not a runtime dependency. Host instructions support belongs to
 fridica #138; projection budget replacement belongs to #39. Issue 38 changes neither.
+
+## R47. Adopted people-run rounds: the arbiter (#46, first slice)
+
+fridica-research is the driver and arbitrator's tool. The crew does not run it: their Slack
+posts and GitHub actions are its inputs. A thread the crew works in is **adopted** by the
+driver and then driven by `arbiter.py`, a pure fold next to `machine.py`
+(`observe(round, event, cfg) -> (round, actions)`). The stage machine is unchanged and keeps
+running AI studies; an adopted thread never becomes one.
+
+```sh
+fridica-research adopt T1:C0123456789:1700000000.000100 --issue 46 --repo chengcli/fridica-research \
+    --role explorer=U1 --role debater=U2,U3 --login debater=ghlogin
+```
+
+- **Adoption is per thread**, stored as `round:<thread>` in `meta`, never in `studies` and never
+  per channel (`issue:<channel>` at cli.py:38 is the leak this avoids). The driver runs `adopt`;
+  the crew runs nothing (G9).
+- **The roster** lists Slack ids per role (a person and their Fridica agent may both hold one).
+  The owner's id is refused as a holder: the owner is escalated to, not assigned. `--delegate`
+  on a person-held role is refused, so no AI worker is ever delegated for it (R47.1).
+- **Every message in an adopted thread reaches the arbiter**, typed by a person (no `turn_kind`)
+  or posted by an agent (`turn_kind`, usually `reply`).
+- **Clearance (R47.2).** A message clears the stage when it comes from a holder of that stage's
+  role and carries a hand-off marker, a mention of a holder of the next role, a link, and a due
+  time written `Due`/`ETA` + `MM-DD HH:MM ET`. On clearance the stage, role and issue assignee
+  move at once and the due time is re-based from the message's own time with the next role's
+  budget. A hand-off with no due time does not clear and is recorded as a finding. A plain
+  progress post never clears, a non-holder never clears, and the arbiter's own posts never clear.
+- **Budgets** come from `[crew_budget]` (explore 4 h, debate 4 h, design audit 2 h, implement
+  24 h, code audit 6 h), deliberately apart from `[projection]`, which sizes AI workers.
+  `merge` has no default and falls back to `stage_timeout`.
+- **Board writes are field-level only**: Status, Stage, Role, Started, Projected finish and the
+  assignee, through the Projects primitives. Never `Board.sync_study`, and never an issue-body
+  edit on an adopted thread (that is #49). The round's stages map onto the board's existing
+  options: CodeAudit -> Audit, Merge -> Deliver.
+- **One fix, one mention.** The hand-off's own mention is the ping, so the arbiter stays silent
+  when it is there (Provision 03.1). When it is missing, the arbiter posts exactly once per
+  stage and author, adding the mention, the link and the re-based due time, and counts the miss.
+  The round still advances: the mention was the arbiter's to fix (R47.4).
+- **No clock-driven closure.** The arbiter arms no timer and a time event produces nothing: no
+  advance, stop, close, retry or delivery ever comes from the clock. The ETA ladder (check in,
+  remind, escalate, each recorded on the board) is a later slice.
+- **Idempotence.** Every arbiter post carries a deterministic `ref:` line; the driver probes the
+  thread by that `ref:` before posting, as `recover` does, and the fold ignores a message
+  timestamp it has already folded. Re-feeding an event posts nothing and advances nothing.
+
+Later slices, tracked on #46: PR adoption and polling, the ETA ladder and off-role reminders,
+merge with the next queued root, and the per-role AI opt-in.

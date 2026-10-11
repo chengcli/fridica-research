@@ -15,7 +15,7 @@ import subprocess
 import time
 from typing import Callable
 
-from . import briefs, contracts, machine, provenance
+from . import arbiter, briefs, contracts, machine, provenance
 from .client import Client, ControlError, Unavailable
 from .config import Config
 from .machine import Action, Event, State
@@ -42,6 +42,14 @@ def thread_id(e: dict) -> str | None:
     return f"{e.get('workspace', '')}:{e['channel']['id']}:{root}" if root and e.get("channel") else None
 
 
+def round_event(e: dict, now: float) -> Event | None:
+    """A feed event as the arbiter sees it: every message of an adopted thread, typed by a person
+    (no `turn_kind`) or posted by a crew member's agent (`turn_kind`, usually "reply")."""
+    if e.get("kind") not in ("message", "peer_post"): return None
+    return Event("crew_post", now, {"ts": e.get("ts", ""), "sender": e.get("sender", ""), "text": e.get("text") or "",
+                                    "post_kind": e.get("turn_kind") or (e.get("meta") or {}).get("kind") or "", "files": int(e.get("files") or 0)})
+
+
 class Driver:
     def __init__(self, cfg: Config, client: Client, store: Store, llm: LlmRunner | None = None, board=None, clock=time.time, sleep=time.sleep, github=None):
         self.cfg, self.client, self.store, self.clock, self.sleep = cfg, client, store, clock, sleep
@@ -58,6 +66,7 @@ class Driver:
         thread = thread_id(e)
         kind = e.get("kind")
         if not thread: return []
+        if self.store.get_meta(arbiter.round_key(thread)) is not None: return []  # #46: an adopted thread is the arbiter's, never the study machine's
         state = self.store.load(thread)
         if kind in ("message", "peer_post"):
             meta_kind = e.get("turn_kind") or (e.get("meta") or {}).get("kind")
@@ -212,6 +221,70 @@ class Driver:
                 else:
                     for ev in self.execute(s, Action("post", w["id"], w["action"])): self.apply(s.thread, ev)
 
+    # -- adopted people-run rounds (#46, R47) --------------------------------------
+    def load_round(self, thread: str) -> arbiter.Round | None:
+        raw = self.store.get_meta(arbiter.round_key(thread))
+        return arbiter.Round.from_json(raw) if raw else None
+
+    def save_round(self, rnd: arbiter.Round): self.store.set_meta(arbiter.round_key(rnd.thread), rnd.to_json())
+
+    def observe_round(self, e: dict) -> bool:
+        """A feed event in an adopted thread: the arbiter's fold, then its actions. True when the thread is adopted.
+
+        No study is ever started here, so an adopted thread has no delegation, no LLM call and no timer."""
+        thread = thread_id(e)
+        rnd = self.load_round(thread) if thread else None
+        if rnd is None: return False
+        ev = round_event(e, self.clock())
+        if ev is None: return True
+        rnd, actions = arbiter.observe(rnd, ev, self.cfg)
+        self.save_round(rnd)
+        for a in actions:
+            log.info("%s %s %s", rnd.thread, a.kind, a.id)
+            finding = self.execute_round(rnd, a)
+            if finding:
+                rnd.findings.append(finding)
+                self.save_round(rnd)
+        return True
+
+    def execute_round(self, rnd: arbiter.Round, a: Action) -> str | None:
+        """Execute one arbiter action through the existing primitives; returns a finding when it could not be done."""
+        if a.kind not in arbiter.ACTION_KINDS: raise ValueError(f"the arbiter may not emit {a.kind}")
+        try:
+            if a.kind == "post":
+                if self.posted_with_ref(rnd.thread, a.id): return None  # restart: the post is already in the thread
+                self.client.post_message(rnd.thread, contracts.PostRequest(a["post_kind"], a["text"]))
+            elif a.kind == "notify_owner":
+                if self.posted_with_ref(rnd.thread, a.id): return None
+                self.client.post_message(rnd.thread, contracts.PostRequest("report", f"<@{self.cfg.owner}> {a['text']}\nref: {a.id}"))
+            elif a.kind == "board_update":
+                self.board_fields(a)
+        except ControlError as e:
+            log.warning("round %s %s failed: %s", a.kind, a.id, e)
+            return f"{a.kind} {a.id} refused: {e}"
+        return None
+
+    def posted_with_ref(self, thread: str, ref: str) -> bool:
+        """The `ref:` probe `recover` uses, applied before every arbiter post: re-feeding an event never posts twice."""
+        try: return self.client.thread(thread).own_post_with_ref(ref, self.cfg.owner) is not None
+        except ControlError as e:
+            log.warning("cannot probe %s for %s: %s", thread, ref, e)
+            return False
+
+    def board_fields(self, a: Action):
+        """R47.2 board writes: Status, Stage, Role, dates and the assignee, field by field. Never `sync_study`, never `--body` (#49)."""
+        if self.board is None or not self.cfg.board.enabled or not a.get("issue"): return
+        api, n = self.board.api, int(a["issue"])
+        writes = [*[(f, lambda f=f, o=o: api.set_option(n, f, o)) for f, o in (a.get("options") or {}).items()],
+                  *[(f, lambda f=f, v=v: api.set_text(n, f, v)) for f, v in (a.get("texts") or {}).items()],
+                  *([("dates", lambda: api.set_dates(n, **a["dates"]))] if a.get("dates") else []),
+                  *[("assignee", lambda login=login: api.edit_issue(n, "--remove-assignee", login)) for login in a.get("remove_assignees") or []],
+                  *([("assignee", lambda: api.edit_issue(n, "--add-assignee", a["assignee"]))] if a.get("assignee") else [])]
+        for name, write in writes:  # one field at a time: a field the project lacks never suppresses the others, and the board never stalls a round
+            try: write()
+            except Exception as e:  # noqa: BLE001 - as in Board.sync, a board failure is logged and retried on the next transition
+                log.warning("board %s for %s failed: %s", name, a.get("thread"), e)
+
     def poll_github(self):
         """R21/R24: each study's PR reviews become machine events; mirror and acknowledgement lines go to the thread as `report` posts."""
         if self.github is None: return
@@ -237,6 +310,9 @@ class Driver:
         n = 0
         for e in page.get("events", []):
             cursor = int(e.get("cursor", page["next"]))
+            if self.observe_round(e):
+                n += 1
+                continue
             for thread, ev in self.translate(e):
                 self.apply(thread, ev, cursor)
                 n += 1

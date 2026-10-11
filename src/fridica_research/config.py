@@ -10,6 +10,11 @@ from pathlib import Path
 DEFAULT_PATH = "~/.config/fridica-research/research.toml"
 STAGES = ("explore", "claim", "debate", "design_audit", "evidence", "implement", "audit", "deliver")
 DEFAULT_PROJECTION = {"explore": 600, "claim": 120, "debate": 1200, "design_audit": 1200, "evidence": 900, "implement": 5400, "audit": 5400, "deliver": 600}
+# `[crew_budget]` (#46, R47.2): how long a person holds a role in an adopted round. Deliberately apart from
+# `[projection]`, which is how long an AI worker is expected to take (10-90 min). A stage with no entry here
+# (`merge`) falls back to `stage_timeout`.
+CREW_STAGES = ("explore", "debate", "design_audit", "implement", "code_audit", "merge")
+DEFAULT_CREW_BUDGET = {"explore": 4 * 3600, "debate": 4 * 3600, "design_audit": 2 * 3600, "implement": 24 * 3600, "code_audit": 6 * 3600}
 _DURATION = re.compile(r"^\s*(\d+(?:\.\d+)?)\s*([smhd]?)\s*$")
 _UNIT = {"": 1, "s": 1, "m": 60, "h": 3600, "d": 86400}
 
@@ -80,6 +85,7 @@ class Config:
     idle_sleep: float = 2.0
     default_projected_hours: float = 4.0
     projection: dict[str, float] = field(default_factory=lambda: dict(DEFAULT_PROJECTION))
+    crew_budget: dict[str, float] = field(default_factory=lambda: dict(DEFAULT_CREW_BUDGET))
     board: Board = field(default_factory=Board)
     reviewers: tuple[Reviewer, ...] = ()
     audit_scopes: tuple[str, ...] = ()  # all scopes; those no reviewer takes go to a local auditor worker
@@ -91,6 +97,7 @@ class Config:
 
     def __post_init__(self):
         object.__setattr__(self, "projection", {**DEFAULT_PROJECTION, **self.projection})
+        object.__setattr__(self, "crew_budget", {**DEFAULT_CREW_BUDGET, **self.crew_budget})
         if not 2 <= self.max_lenses <= 3: raise ValueError("max_lenses must be 2 or 3 (host default worker cap: 4)")
 
     @property
@@ -130,6 +137,7 @@ class Config:
         """Inverse of `to_dict` (the replay corpus stores the config as JSON)."""
         d = dict(d)
         d["projection"] = {**DEFAULT_PROJECTION, **d.get("projection", {})}
+        d["crew_budget"] = {**DEFAULT_CREW_BUDGET, **d.get("crew_budget", {})}
         d["board"] = Board(**d.get("board", {}))
         d["reviewers"] = tuple(Reviewer(**r) for r in d.get("reviewers", ()))
         g = dict(d.get("github", {}))
@@ -147,6 +155,10 @@ def parse(text: str) -> Config:
     for k, v in raw.get("projection", {}).items():
         if k not in STAGES: raise ValueError(f"[projection] unknown stage {k}")
         proj[k] = duration(v, proj[k])
+    crew = dict(DEFAULT_CREW_BUDGET)
+    for k, v in raw.get("crew_budget", {}).items():
+        if k not in CREW_STAGES: raise ValueError(f"[crew_budget] unknown stage {k}")
+        crew[k] = duration(v, crew.get(k, 0.0))
     b = raw.get("board", {})
     a = raw.get("audit", {})
     reviewers = tuple(_reviewer(r) for r in a.get("reviewers", []))
@@ -161,7 +173,7 @@ def parse(text: str) -> Config:
         auditor_backend=str(raw.get("auditor_backend", "other")), auto_followon=bool(raw.get("auto_followon", True)),
         max_generations=int(raw.get("max_generations", 5)), stage_timeout=duration(raw.get("stage_timeout"), 7200.0),
         settle_window=duration(raw.get("settle_window"), 60.0), idle_sleep=duration(raw.get("idle_sleep"), 2.0),
-        default_projected_hours=float(raw.get("default_projected_hours", 4.0)), projection=proj,
+        default_projected_hours=float(raw.get("default_projected_hours", 4.0)), projection=proj, crew_budget=crew,
         board=Board(bool(b.get("enabled", False)), str(b.get("owner", "")), int(b.get("number", 0)), str(b.get("repo", "")), str(b.get("token_env", "GH_TOKEN")), str(b.get("owner_type", "user"))),
         reviewers=reviewers, audit_scopes=scopes, require_signoffs=bool(a.get("require_signoffs", True)),
         people={str(k): str(v) for k, v in raw.get("people", {}).items()}, llm_model=str(raw.get("llm_model", "haiku")),

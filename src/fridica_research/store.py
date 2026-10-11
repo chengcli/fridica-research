@@ -56,6 +56,10 @@ class Store:
     def all(self) -> list[State]:
         return [State.from_dict(json.loads(r[0])) for r in self.db.execute("SELECT state_json FROM studies ORDER BY updated_at")]
 
+    def rounds(self) -> list[str]:
+        """Threads adopted as people-run rounds (#46): `round:<thread>` meta keys, never rows of `studies`."""
+        return [r[0].split(":", 1)[1] for r in self.db.execute("SELECT key FROM meta WHERE key LIKE 'round:%' ORDER BY key")]
+
     def command(self, thread: str, cmd: str | None = None) -> str | None:
         """Owner commands from the CLI to the serving driver: `cmd` appends one; none pops the oldest."""
         key = f"cmd:{thread}"

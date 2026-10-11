@@ -1,13 +1,14 @@
-"""`fridica-research start | list | stop | resume | note | pr | serve | replay` (argparse, stdlib only)."""
+"""`fridica-research start | adopt | list | stop | resume | note | pr | serve | replay` (argparse, stdlib only)."""
 from __future__ import annotations
 
 import argparse
 import json
 import logging
 import sys
+import time
 from dataclasses import asdict
 
-from . import config, contracts, provenance
+from . import arbiter, config, contracts, provenance
 from .board import Board, role_totals
 from .client import Client, read_capability
 from .driver import Driver, claude_runner
@@ -41,6 +42,28 @@ def cmd_start(cfg: config.Config, args) -> int:
     return 0
 
 
+def cmd_adopt(cfg: config.Config, args) -> int:
+    """#46/R47: the driver adopts a people-run thread. No study is started on it and no AI worker is ever delegated for it."""
+    store = Store(cfg.state_file)
+    try:
+        if store.load(args.thread) is not None:
+            print(f"{args.thread} is an AI study; adopt is for people-run threads", file=sys.stderr)
+            return 1
+        if store.get_meta(arbiter.round_key(args.thread)) is not None:
+            print(f"{args.thread} is already adopted", file=sys.stderr)
+            return 1
+        try:
+            rnd, _ = arbiter.adopt(args.thread, issue=args.issue, repo=args.repo, roles=args.role, logins=args.login, delegate=args.delegate, stage=args.stage, now=time.time(), cfg=cfg)
+        except arbiter.RosterError as e:
+            print(str(e), file=sys.stderr)
+            return 1
+        store.set_meta(arbiter.round_key(rnd.thread), rnd.to_json())
+        print(f"adopted {rnd.thread} at {rnd.stage} ({arbiter.ROUND_ROLE[rnd.stage]}); {arbiter.due_line(rnd.due)}; the serving driver observes the thread from the feed")
+        return 0
+    finally:
+        store.close()
+
+
 def cmd_list(cfg: config.Config, args) -> int:
     store = Store(cfg.state_file)
     board = Board(cfg, remember=store.set_meta, recall=store.get_meta) if args.board and cfg.board.enabled else None
@@ -52,6 +75,10 @@ def cmd_list(cfg: config.Config, args) -> int:
             cards = json.loads(store.get_meta(f"board:{s.thread}") or "{}")
             for label, number in [("study", cards.get("issue")), *[(f"stage {i + 1}" + (f" {c['scope']}" if c.get("scope") else ""), c["issue"]) for i, st in enumerate(cards.get("stages", [])) for c in st.get("cards", [])]]:
                 if number: print(f"  #{number} {label}: {board.api.verify(number)}")
+    for thread in store.rounds():
+        r = arbiter.Round.from_json(store.get_meta(arbiter.round_key(thread)) or "{}")
+        holders = ", ".join(f"{role}={'+'.join(e.get('holders') or [])}" for role, e in sorted(r.roster.items()))
+        print(f"{r.thread}\tround {r.stage}/{arbiter.ROUND_ROLE.get(r.stage, '?')}\t{arbiter.due_line(r.due)}\tissue {r.issue or '-'}\t{holders}")
     store.close()
     return 0
 
@@ -111,6 +138,14 @@ def parser() -> argparse.ArgumentParser:
     s.add_argument("--revision", default="HEAD", help="input revision in that checkout")
     s.add_argument("--projected-hours", type=float, default=None)
     s.add_argument("--issue", type=int, default=None, help="attach an existing GitHub issue as the study card")
+    ad = sub.add_parser("adopt", help="adopt a people-run thread as a round the arbiter drives (#46, R47); the driver runs this, never the crew")
+    ad.add_argument("thread", help="the thread id, workspace:channel:root_ts")
+    ad.add_argument("--issue", type=int, default=None, help="the GitHub issue whose board fields the round moves")
+    ad.add_argument("--repo", default="", help="owner/name of that issue")
+    ad.add_argument("--role", action="append", default=[], help="role=U… (repeatable; several holders as role=U1,U2 for a person and their agent)")
+    ad.add_argument("--login", action="append", default=[], help="role=github-login for the issue assignee (repeatable)")
+    ad.add_argument("--delegate", action="append", default=[], help="opt a role in to an AI worker; refused in this slice, and always refused on a person-held role (R47.1)")
+    ad.add_argument("--stage", default=arbiter.ORDER[0], choices=arbiter.ORDER, help="the stage the round is in now")
     ls = sub.add_parser("list", help="list studies and their stages")
     ls.add_argument("--board", action="store_true", help="also print projected/actual hours per role and read each card back from the project")
     sub.add_parser("roles", help="list packaged research roles and debater lenses")
@@ -154,6 +189,7 @@ def main(argv: list[str] | None = None) -> int:
         return 0
     cfg = config.load(args.config)
     if args.cmd == "start": return cmd_start(cfg, args)
+    if args.cmd == "adopt": return cmd_adopt(cfg, args)
     if args.cmd == "list": return cmd_list(cfg, args)
     if args.cmd in ("stop", "resume"): return cmd_command(cfg, args, args.cmd)
     if args.cmd == "note": return cmd_command(cfg, args, f"note:{args.text}")

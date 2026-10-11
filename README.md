@@ -42,6 +42,13 @@ socket = "~/.local/state/fridica/control.sock"
 # capability_file = "~/.config/fridica/research.cap"   # bearer secret; omit for same-uid access
 owner = "U0123456"                  # the owner's Slack user id (own posts are sender == owner)
 
+[crew_budget]                       # how long a person holds a role in an adopted round (R47.2, #46);
+explore = "4h"                      # separate from [projection], which is how long an AI worker takes.
+debate = "4h"                       # A stage with no entry here (merge) falls back to stage_timeout.
+design_audit = "2h"
+implement = "24h"
+code_audit = "6h"
+
 [projection]                        # projected stage durations (R4)
 explore = "10m"
 claim = "2m"
@@ -80,7 +87,9 @@ poll_interval = "2m"
 ```sh
 fridica-research serve                       # the driver, one per owner, on the daemon's machine
 fridica-research start C0123456789 "Study X" --projected-hours 3 [--issue 12]
-fridica-research list [--board]
+fridica-research adopt <thread> --issue 46 --repo o/r --role explorer=U1 --role debater=U2,U3 --login debater=ghlogin
+                                             # a people-run round the arbiter drives (R47); the driver runs this, never the crew
+fridica-research list [--board]              # studies, then adopted rounds
 fridica-research stop <workspace:channel:root_ts>
 fridica-research resume <thread>             # after a Blocked study is fixed
 fridica-research note <thread> "R9: ..."     # a mid-stage change: a finding for this iteration, never sent to a running worker

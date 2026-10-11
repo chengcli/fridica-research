@@ -29,6 +29,8 @@ class FakeGh:
         self.missing = set(fields_missing)
         self.fail_on = fail_on
         self.fail_once: str | None = None  # fails the first matching call, then clears
+        self.comments: dict[int, list[dict]] = {}  # issue -> its comments in the REST shape (`id`, `body`, `user`, `html_url`)
+        self.login = "driver-bot"  # the token's account, the author of what the driver posts
 
     def __call__(self, argv: list[str], stdin: str | None) -> str:
         doc = json.loads(stdin) if stdin else None
@@ -42,10 +44,32 @@ class FakeGh:
         if argv[:3] == ["gh", "issue", "create"]:
             self.issues += 1
             return f"https://github.com/{argv[4]}/issues/{self.issues}\n"
+        if argv[:3] == ["gh", "issue", "comment"]:  # gh prints the new comment's URL
+            return self.add_comment(argv[argv.index("-R") + 1], int(argv[3]), argv[argv.index("--body") + 1], self.login)["html_url"] + "\n"
+        if argv[:2] == ["gh", "api"] and "/comments" in " ".join(argv):
+            return self.rest_comments(argv, doc)
         if argv[:3] == ["gh", "project", "field-create"]:
             self.missing.discard(argv[argv.index("--name") + 1])
             return "{}"
         return ""
+
+    def add_comment(self, repo: str, issue: int, body: str, login: str) -> dict:
+        cid = 3_000_000_001 + sum(len(c) for c in self.comments.values())
+        c = {"id": cid, "node_id": f"IC_{cid}", "html_url": f"https://github.com/{repo}/issues/{issue}#issuecomment-{cid}", "body": body, "user": {"login": login, "type": "User"}}
+        self.comments.setdefault(issue, []).append(c)
+        return c
+
+    def rest_comments(self, argv: list[str], doc: dict | None) -> str:
+        """`gh api --paginate repos/<o>/<r>/issues/<n>/comments` (pages of two printed back to back) and `-X PATCH .../issues/comments/<id>` (the updated comment)."""
+        path = next(a for a in argv[2:] if a.startswith("repos/")).split("?")[0]
+        parts = path.split("/")  # repos/<o>/<r>/issues/<n>/comments or repos/<o>/<r>/issues/comments/<id>
+        if parts[4] == "comments":
+            c = next((c for cs in self.comments.values() for c in cs if c["id"] == int(parts[5])), None)
+            if c is None: raise RuntimeError("gh: Not Found (HTTP 404)")
+            c["body"] = doc["body"]
+            return json.dumps(c)
+        cs = self.comments.get(int(parts[4]), [])
+        return "".join(json.dumps(cs[i:i + 2]) for i in range(0, len(cs), 2)) or "[]"
 
     def answer(self, query: str, v: dict) -> dict:
         if query == board.Q_DISCOVER["user"]:
@@ -58,7 +82,7 @@ class FakeGh:
         if query == board.Q_VERIFY: return {"repository": {"issue": {"projectItems": {"nodes": [{"project": {"number": 8}, "started": {"date": "2026-10-04"}, "projected_finish": {"date": "2026-10-04"}, "finished": None, "projected_hours": {"number": 4.0}, "actual_hours": None, "stage": {"name": "Explore"}}]}}}}
         raise AssertionError(f"unexpected query {query[:60]}")
 
-    def sets(self, mutation: str) -> list[dict]: return [doc["variables"] for argv, doc in self.calls if doc and doc["query"] == mutation]
+    def sets(self, mutation: str) -> list[dict]: return [doc["variables"] for argv, doc in self.calls if doc and doc.get("query") == mutation]
     def argv(self, *prefix: str) -> list[list[str]]: return [a for a, _ in self.calls if tuple(a[: len(prefix)]) == prefix]
 
 

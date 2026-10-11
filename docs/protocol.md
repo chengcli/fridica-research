@@ -136,7 +136,12 @@ written, so a gh failure midway makes the next sync finish the writes on that is
 open a second one. An issue given to `start --issue N` (store meta `issue:<channel>`) is read when
 the study's card is first made, also when `serve` was already running; it is adopted, the cards
 are stored, and only then is the key deleted, so a later study in the channel makes its own issue.
-The adopted issue gets one comment naming the study (recorded with the cards once posted) and,
+The adopted issue gets one comment naming the study and carrying what a created body does apart
+from the roles table (stage timing, provenance, the field-setup finding, the repeated mention
+misses); its id is recorded with the cards once posted and the comment is PATCHed in place when
+its text changes (#60). A card from before #60 (`commented`, no id) looks the comment up by its
+marker (`Adopted as the study card of fridica-research study <thread>`), stores the id and PATCHes
+it; only when no such comment exists is one posted, so there is never a second. The issue gets,
 when the study ends, its Finished date, Actual hours and Done status, but the driver never closes
 it: the PR's `Closes #N` does. Nor does it ever edit the adopted issue's body, which is the
 maintainer's (close criteria); a created issue's body carries the stage and roles tables, an

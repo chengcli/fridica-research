@@ -3,10 +3,17 @@
 The snapshot written after every step equals the fold of `step` over the events (the machine
 is pure), so there is no event log and no actions table. `meta` holds the feed cursor, owner
 commands from the CLI (`cmd:<thread>`), and the board's card ids (`board:<thread>`).
+
+#93: one `serve` per state file (`lock`, an advisory `flock` on `<state>.lock` holding the
+holder's pid), and every read-modify-write of a `wave:` blob runs in `transaction`
+(`BEGIN IMMEDIATE`), so a CLI edit never races the serving driver.
 """
 from __future__ import annotations
 
+import contextlib
+import fcntl
 import json
+import os
 import sqlite3
 import time
 from pathlib import Path
@@ -19,12 +26,54 @@ CREATE TABLE IF NOT EXISTS studies (thread_id TEXT PRIMARY KEY, state_json TEXT 
 """
 
 
+class LockHeld(RuntimeError):
+    """Another `serve` holds the state lock. The message names the lock file and the pid written in it."""
+
+
 class Store:
     def __init__(self, path: str | Path = ":memory:"):
         if path != ":memory:": Path(path).parent.mkdir(parents=True, exist_ok=True)
+        self.path = str(path)
         self.db = sqlite3.connect(str(path), isolation_level=None)
         self.db.execute("PRAGMA journal_mode=WAL") if path != ":memory:" else None
         self.db.executescript(SCHEMA)
+
+    @property
+    def lock_path(self) -> Path | None:
+        """`<state>.lock` beside the state file; None for an in-memory store, which no other process shares."""
+        return None if self.path == ":memory:" else Path(self.path + ".lock")
+
+    @contextlib.contextmanager
+    def lock(self):
+        """One holder per state file (#93): an advisory `flock` on `<state>.lock`, whose contents are the holder's pid.
+
+        A lock already held raises `LockHeld` naming that lock file and that pid, never a bare "busy"; an
+        in-memory store locks nothing. Releasing clears the pid, so a stale file never names a dead holder."""
+        p = self.lock_path
+        if p is None:
+            yield None
+            return
+        p.parent.mkdir(parents=True, exist_ok=True)
+        fh = open(p, "a+")
+        try:
+            try: fcntl.flock(fh.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except OSError as e:
+                fh.seek(0)
+                raise LockHeld(f"{p} is held by pid {fh.read().strip() or 'unknown'}; one fridica-research serve at a time on this state file") from e
+            fh.seek(0); fh.truncate(); fh.write(f"{os.getpid()}\n"); fh.flush()
+            yield fh
+        finally:
+            with contextlib.suppress(OSError):
+                fh.seek(0); fh.truncate(); fh.flush()
+            fh.close()  # closing the last descriptor releases the flock
+
+    @contextlib.contextmanager
+    def transaction(self):
+        """`BEGIN IMMEDIATE`: the writer takes the write lock before it reads, so a read-modify-write of a
+        stored blob never loses an update to a concurrent writer (#93). Commits on exit, rolls back on an exception."""
+        with self.db:
+            self.db.execute("BEGIN IMMEDIATE")
+            yield self
 
     def get_meta(self, key: str, default: str | None = None) -> str | None:
         row = self.db.execute("SELECT value FROM meta WHERE key=?", (key,)).fetchone()

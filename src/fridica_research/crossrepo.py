@@ -7,7 +7,7 @@ the caller executes. The action kinds are exactly `card_update`, `notify_impleme
 - The repo must be listed in `cfg.repos` (R23 `[repos]`); anything else is refused.
 - The issue body carries the study thread, the board link and the contract or finding, as the
   `Study thread:` / `Board:` lines of `contracts.pr_body`.
-- The first poll (`prev is None`) is a baseline: a card update only, no notification.
+- The first poll (`prev` None or empty) is a baseline: a card update only, no notification.
 - A change of state, of the review set, of `reviewDecision` or of `headRefOid` notifies the PR's
   implementer (its author) only, plus a card update; a new CHANGES_REQUESTED also records a finding.
 - R22 Amendment 1: nothing here requests or chases a review.
@@ -55,20 +55,29 @@ def snapshot(view: dict) -> dict:
 
 
 def track(prev: dict | None, view: dict) -> tuple[dict, list[Action]]:
-    """One poll of the PR: the next state and the actions. Pure."""
+    """One poll of the PR: the next state and the actions. Pure.
+
+    `prev` None or empty is the baseline. Every action id carries the transition number `n` (0 at the
+    baseline, +1 per change), so a comment then an approval at one head, or CR -> dismissed -> CR, each
+    get their own ids; a finding's id also names the review's login and `submittedAt`."""
     s = snapshot(view)
     key = f"{s['url'] or s['number']}"
-    card = Action("card_update", f"crossrepo/{key}/card/{s['state']}/{s['head']}/{s['decision']}/{len(s['reviews'])}", {"pr": s["url"], "state": s["state"], "decision": s["decision"], "head": s["head"], "reviews": s["reviews"]})
-    if prev is None: return s, [card]  # baseline: no notification
+    n = int(prev.get("n", 0)) + 1 if prev else 0
+    s["n"] = n
+    card = Action("card_update", f"crossrepo/{key}/{n}/card", {"pr": s["url"], "state": s["state"], "decision": s["decision"], "head": s["head"], "reviews": s["reviews"]})
+    if not prev: return s, [card]  # baseline: no notification, no finding
     changed = [k for k in ("state", "reviews", "decision", "head") if prev.get(k) != s[k]]
-    if not changed: return s, []
+    if not changed:
+        s["n"] = prev.get("n", 0)
+        return s, []
     actions = [card]
     new = [p for p in s["reviews"] if p not in (prev.get("reviews") or [])]
+    submitted = {(str((r.get("author") or {}).get("login", "")), str(r.get("state", ""))): str(r.get("submittedAt", "")) for r in view.get("latestReviews") or []}
     for login, state in new:
         if state == "CHANGES_REQUESTED":
-            actions.append(Action("finding", f"crossrepo/{key}/changes/{login}/{s['head']}", {"pr": s["url"], "text": f"{login} requested changes on {s['url'] or key} at {s['head'][:12]}"}))
+            actions.append(Action("finding", f"crossrepo/{key}/{n}/changes/{login}/{submitted.get((login, state), '')}", {"pr": s["url"], "text": f"{login} requested changes on {s['url'] or key} at {s['head'][:12]}"}))
     if s["implementer"]:
         what = ", ".join(changed)
-        actions.append(Action("notify_implementer", f"crossrepo/{key}/notify/{'-'.join(changed)}/{s['head']}", {"to": s["implementer"], "pr": s["url"], "changed": changed,
+        actions.append(Action("notify_implementer", f"crossrepo/{key}/{n}/notify", {"to": s["implementer"], "pr": s["url"], "changed": changed,
                               "text": f"@{s['implementer']} {s['url'] or key} changed ({what}): state {s['state']}, decision {s['decision'] or '(none required)'}, head {s['head'][:12]}"}))
     return s, actions

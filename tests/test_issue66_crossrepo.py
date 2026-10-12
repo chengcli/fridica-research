@@ -122,3 +122,26 @@ def test_file_issue_needs_the_thread_and_the_contract():
         crossrepo.file_issue("chengcli/snapy", "t", "b", CFG, thread="", contract="c")
     with pytest.raises(ValueError, match="contract"):
         crossrepo.file_issue("chengcli/snapy", "t", "b", CFG, thread=THREAD, contract=" ")
+
+
+# -- audit fixes (fm-wave-e-job3-fix) ---------------------------------------------------------
+def test_an_empty_prev_is_a_baseline_too():
+    s, actions = crossrepo.track({}, view(reviews=[latest("rev", "CHANGES_REQUESTED")], decision="CHANGES_REQUESTED"))
+    assert kinds(actions) == ["card_update"] and s["head"] == HEAD
+
+
+def test_action_ids_are_unique_per_transition_at_the_same_head():
+    def ids(seq):
+        s, out = None, []
+        for v in seq:
+            s, actions = crossrepo.track(s, v)
+            out += [a.id for a in actions]
+        return out
+    comment_then_approve = [view(), view(reviews=[latest("rev", "COMMENTED")]), view(reviews=[latest("rev", "APPROVED")])]
+    got = ids(comment_then_approve)
+    assert len(got) == 5 and len(set(got)) == len(got)
+    cr = view(reviews=[latest("rev", "CHANGES_REQUESTED")], decision="CHANGES_REQUESTED")
+    cr_dismissed_cr = [view(), cr, view(reviews=[latest("rev", "DISMISSED")]), {**cr, "latestReviews": [{**latest("rev", "CHANGES_REQUESTED"), "submittedAt": "2026-10-12T14:00:00Z"}]}]
+    got = ids(cr_dismissed_cr)
+    assert len(set(got)) == len(got)
+    assert sum("/changes/" in i for i in got) == 2  # one finding per CHANGES_REQUESTED, each with its own id

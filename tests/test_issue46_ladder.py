@@ -83,7 +83,7 @@ def test_silent_for_exactly_eta_plus_w_is_not_rescheduled():
 def test_silent_for_more_than_eta_plus_w_reschedules_to_the_first_free_alternative():
     out = ladder.step(checked_in(), ETA + W + EPS)
     assert kinds(out) == ["reschedule"]
-    assert out[0].id == f"{REF}/reschedule" and out[0]["from"] == HOLDER and out[0]["to"] == "UFREE1"
+    assert out[0].id == f"{REF}/reschedule/{HOLDER}" and out[0]["from"] == HOLDER and out[0]["to"] == "UFREE1"
 
 
 def test_a_reply_after_the_check_in_stops_the_reschedule():
@@ -94,9 +94,9 @@ def test_a_reply_before_the_check_in_does_not_count():
     assert kinds(ladder.step(checked_in(last_reply=ETA - 1), ETA + W + EPS)) == ["reschedule"]
 
 
-def test_nobody_free_escalates_to_the_owner():
+def test_nobody_free_wakes_the_deputy():
     out = ladder.step(checked_in(alternatives=[{"id": "UBUSY", "free": False}, {"id": HOLDER, "free": True}]), ETA + W + EPS)
-    assert kinds(out) == ["notify_owner"] and out[0].id == f"{REF}/escalate" and f"<@{OWNER}>" in out[0]["text"]
+    assert kinds(out) == ["wake_deputy"] and out[0].id == f"{REF}/escalate" and f"<@{OWNER}>" not in out[0]["text"]
 
 
 @pytest.mark.parametrize("cause", ["quota", "offline"])
@@ -119,21 +119,23 @@ def test_the_outie_is_not_asked_for_any_other_cause(cause):
         assert "ask_outie" not in kinds(ladder.step(checked_in(cause=cause), t))
 
 
-@pytest.mark.parametrize("kind", ["scope", "merge"])
-def test_scope_and_merge_questions_go_to_the_owner_at_any_time(kind):
+@pytest.mark.parametrize("kind", ["merge_substrate", "scope", "rules"])
+def test_owner_only_questions_go_to_the_owner_at_any_time(kind):
     q = [{"id": "q1", "kind": kind, "text": "is X in scope?"}]
     for t in (T0, ETA + 10 * W):
         out = ladder.step(view(questions=q, deliverable=True), t)
         assert kinds(out) == ["notify_owner"] and out[0].id == f"{REF}/question/q1" and out[0]["to"] == OWNER
 
 
-def test_other_questions_do_not_go_to_the_owner():
-    assert ladder.step(view(questions=[{"id": "q1", "kind": "howto"}]), T0) == []
+@pytest.mark.parametrize("kind", ["howto", "merge"])
+def test_other_questions_wake_the_deputy_not_the_owner(kind):
+    out = ladder.step(view(questions=[{"id": "q1", "kind": kind}]), T0)
+    assert kinds(out) == ["wake_deputy"] and out[0].id == f"{REF}/question/q1" and f"<@{OWNER}>" not in out[0]["text"]
 
 
 # -- idempotence --------------------------------------------------------------------------
 def test_the_done_set_makes_every_action_happen_once():
-    v = view(cause="hardware", questions=[{"id": "q1", "kind": "merge"}])
+    v = view(cause="hardware", questions=[{"id": "q1", "kind": "scope"}])
     first = ladder.step(v, ETA)
     assert sorted(kinds(first)) == ["ask_outie", "notify_owner", "post"]
     v = dataclasses.replace(v, done=set(v.done) | {a.id for a in first}, checkin_at=ETA)

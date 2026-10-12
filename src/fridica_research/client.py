@@ -88,3 +88,8 @@ class Client:
     def post_root(self, channel: str, req: contracts.PostRequest) -> dict: return self.post(contracts.STUDY_ROOT_ROUTE.format(channel=channel), req.body())
     def stop_worker(self, thread: str, worker_id: str) -> dict: return self.post(contracts.stop_route(thread, worker_id), {"actor": "owner"})
     def set_driver(self, thread: str, driver: str) -> dict: return self.post(contracts.driver_route(thread), {"driver": driver})
+
+    def instruct(self, thread: str, text: str, client_id: str, actor: str = "owner") -> dict:
+        """Queue an owner instruction (fridica src/control/api.rs: `POST /threads/<id>/instruct`, body exactly
+        actor, text, client_id; client_id is 8-80 chars of [A-Za-z0-9-], and a reused id is not queued twice)."""
+        return self.post(f"/threads/{thread}/instruct", {"actor": actor, "text": text, "client_id": client_id})

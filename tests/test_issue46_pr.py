@@ -70,7 +70,7 @@ def setup(world, stage: str, pr_: dict | None = None):
 # -- adoption ----------------------------------------------------------------------------
 def test_closes_or_refs_is_a_whole_word_and_only_for_the_rounds_repo():
     yes = ["Closes #46", "Refs #46 (slices 3 and 4 remain)", "refs chengcli/fridica-research#46", "Closes #46.", "x\nRefs #46\n"]
-    no = ["Closes #4", "Closes #460", "Refs #461x", "Fixes #46", "Refs other/repo#46", "#46", "Refs #46-b", "Refs #4 6"]
+    no = ["Closes #4", "Closes #460", "Refs #461x", "Fixed46 #46", "Refs other/repo#46", "#46", "Refs #46-b", "Refs #4 6"]
     assert all(arbiter.closes_or_refs(b, 46, REPO) for b in yes)
     assert not any(arbiter.closes_or_refs(b, 46, REPO) for b in no)
 
@@ -140,7 +140,8 @@ def test_code_audit_clears_only_on_the_auditors_approval_of_the_current_head(wor
     drain(drv)
     r = rnd(store)
     assert r["stage"] == "Merge" and r["held"] == {} and r["clearance"]["CodeAudit"]["author"] == AUDITOR  # the held hand-off replayed
-    assert own_posts(server) == []
+    posts = own_posts(server)  # #87: the move into Merge posts "ready to merge" once for the head, and nothing else
+    assert len(posts) == 1 and "ready to merge" in posts[0] and NEW[:12] in posts[0]
 
 
 def test_changes_requested_sends_the_round_back_once_and_an_approval_then_clears_through(world):
@@ -156,7 +157,8 @@ def test_changes_requested_sends_the_round_back_once_and_an_approval_then_clears
     drain(drv)
     r = rnd(store)
     assert r["stage"] == "Merge" and r["clearance"]["CodeAudit"]["review"] == "6"  # cleared through, no second hand-off
-    assert len(own_posts(server)) == 1
+    posts = own_posts(server)
+    assert len(posts) == 2 and "ready to merge" in posts[1]  # #87: the changes post, then one "ready to merge" for the new head
 
 
 def test_a_changes_request_on_a_stale_head_does_nothing(world):

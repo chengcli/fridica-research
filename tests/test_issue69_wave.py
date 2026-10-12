@@ -140,7 +140,7 @@ def test_three_job_fold_is_deterministic_on_replay():
     assert [a["kind"] for a in a1].count("wave_close") == 1 and a1[-1]["kind"] == "wave_close"
     assert [j.rnd().pr["number"] for j in w1.jobs] == [71, 72, 73]
     assert [j.delivered for j in w1.jobs] == [{"pr": T0 + H, "review": T0 + 3 * H + 60}, {"pr": T0 + H, "review": T0 + 3 * H + 120}, {"pr": T0 + 1.5 * H, "review": T0 + 3 * H + 180}]
-    assert [j.rnd().stage for j in w1.jobs] == ["Merge", "CodeAudit", "Merge"]  # job 2's auditor never handed off, but its approval on the head made it merge-ready
+    assert [j.rnd().stage for j in w1.jobs] == ["Merge"] * 3  # #87: job 2's auditor never handed off, and its approval on the head moved it to Merge
     assert [f for f in w1.findings if "not routed" in f] == ["crew_post 1.4 not routed: USTRANGER holds no role and the post names no job"]
     assert not any("merge-ready" in f for f in w1.findings)
 
@@ -150,7 +150,7 @@ def test_persist_and_resume_mid_wave_gives_the_same_fold():
     straight, actions = fold(opened(), tape)
     half, first = fold(opened(), tape[:9])
     resumed = wave.Wave.from_json(half.to_json())  # what the store holds between two driver passes
-    assert resumed.to_json() == half.to_json() and resumed.jobs[0].rnd().stage == "CodeAudit"
+    assert resumed.to_json() == half.to_json() and resumed.jobs[0].rnd().stage == "Merge"
     back, rest = fold(resumed, tape[9:])
     assert back.to_json() == straight.to_json() and first + rest == actions
 

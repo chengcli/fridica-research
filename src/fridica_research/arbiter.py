@@ -197,9 +197,10 @@ def parse_roster(roles: list[str], logins: list[str], delegate: list[str], owner
 
 # -- the round's PR (slice 2) ------------------------------------------------------------
 def closes_or_refs(body: str, issue: int | None, repo: str) -> bool:
-    """`Closes #N` or `Refs #N` as a whole word (`#4` and `#460` never match `#46`); `owner/repo#N` counts only for the round's own repo."""
+    """A closing keyword (close/closes/closed, fix/fixes/fixed, resolve/resolves/resolved) or `Refs` before `#N` as a whole word
+    (`#4` and `#460` never match `#46`); `owner/repo#N` counts only for the round's own repo."""
     if not issue: return False
-    for m in re.finditer(r"\b(?:closes|refs)\s+(?:(?P<repo>[\w.-]+/[\w.-]+))?#(?P<n>\d+)(?![\w-])", body or "", re.I):
+    for m in re.finditer(r"\b(?:close[sd]?|fix(?:es|ed)?|resolve[sd]?|refs)\s+(?:(?P<repo>[\w.-]+/[\w.-]+))?#(?P<n>\d+)(?![\w-])", body or "", re.I):
         if int(m.group("n")) == int(issue) and (not m.group("repo") or m.group("repo").lower() == (repo or "").lower()): return True
     return False
 
@@ -290,7 +291,9 @@ def clear(r: Round, stage: str, sender: str, text: str, ts: str, now: float, cfg
     next_holders = r.holders(nrole)
     has_mention = bool(mentioned & set(next_holders))
     rebased = now + budget(cfg, nxt)
-    if not has_mention and not next_holders:
+    if nxt == "Merge":
+        pass  # nobody is handed Merge: the auditor stays assignee and `move` posts "ready to merge" (#87)
+    elif not has_mention and not next_holders:
         # Nobody holds the next role, so there is no mention to add: a post naming no one helps no one.
         # That is a gap in the roster the driver adopted with, not a miss by the hand-off's author.
         r.findings.append(f"{nxt}: no {nrole} in the roster, so the hand-off's missing mention cannot be added")
@@ -312,7 +315,14 @@ def move(r: Round, stage: str, nxt: str, now: float, key: str, cfg: Config) -> l
     """Stage, start and due move at once; the board follows; durable actions go on `pending` before anything is sent (A5)."""
     r.stage, r.stage_started, r.due = nxt, now, now + budget(cfg, nxt)
     board = board_action(r, stage, nxt, ROUND_ROLE[nxt], key, cfg)
-    return [board] if board is not None else []
+    actions = [board] if board is not None else []
+    if nxt == "Merge" and r.pr.get("number"):  # once per head: a new head after a bounce posts again
+        ref = f"{r.thread}/round/merge/{r.pr['number']}/{r.pr.get('head', '')}"
+        if ref not in r.posted_refs:
+            r.posted_refs.append(ref)
+            actions.insert(0, Action("post", ref, {"thread": r.thread, "post_kind": "report", "text": "\n".join([
+                f"PR #{r.pr['number']} is approved on {str(r.pr.get('head', ''))[:12]}: ready to merge.", f"ref: {ref}"])}))
+    return actions
 
 
 def polled(r: Round, ev: Event, cfg: Config) -> tuple[Round, list[Action]]:
@@ -336,27 +346,29 @@ def polled(r: Round, ev: Event, cfg: Config) -> tuple[Round, list[Action]]:
         rv = max(verdicts, key=lambda v: (v["at"], v["n"])) if verdicts else None
         r.pr["review"] = {"id": rv["id"], "state": rv["state"], "commit": rv["commit"], "login": rv["login"]} if rv else {}
     rv, head = r.pr.get("review") or {}, r.pr.get("head")
-    if r.stage == "CodeAudit" and rv.get("state") == "CHANGES_REQUESTED" and rv.get("commit") == head and r.pr.get("changes_requested") != rv["id"]:
+    if r.stage in PR_STAGES and rv.get("state") == "CHANGES_REQUESTED" and rv.get("commit") == head and r.pr.get("changes_requested") != rv["id"]:
+        # in CodeAudit the round goes back to Implement; in Implement it stays there, and the implementer is still told
         r.pr["changes_requested"] = rv["id"]
         r.held.pop("CodeAudit", None)
         ref = f"{r.thread}/round/changes/{rv['id']}"
-        actions += move(r, "CodeAudit", "Implement", ev.now, f"review-{rv['id']}", cfg)
+        if r.stage == "CodeAudit": actions += move(r, "CodeAudit", "Implement", ev.now, f"review-{rv['id']}", cfg)
         if ref not in r.posted_refs:
             r.posted_refs.append(ref)
             who = " ".join(f"<@{h}>" for h in r.holders("implementer")) or "(holder unset)"
             actions.insert(0, Action("post", ref, {"thread": r.thread, "post_kind": "report", "text": "\n".join([
-                f"{who} the auditor requested changes on PR #{r.pr['number']} at {str(head)[:12]}; the round is back in Implement.",
-                due_line(r.due), f"ref: {ref}"])}))
+                f"{who} the auditor requested changes on PR #{r.pr['number']} at {str(head)[:12]}; the round is in Implement.",
+                "The floor manager sets the fix ETA.", f"ref: {ref}"])}))
     elif r.stage == "CodeAudit" and approved(r) and "CodeAudit" in r.held:
         h = r.held["CodeAudit"]
         actions += clear(r, "CodeAudit", h["sender"], h["text"], h["ts"], ev.now, cfg)
-    elif r.stage == "Implement" and approved(r) and r.pr.get("changes_requested"):
-        # back in Implement after changes were requested: the approval clears through CodeAudit, no second hand-off
-        r.clearance["Implement"] = {"review": rv["id"], "author": rv["login"], "head": head}
+    elif r.stage in PR_STAGES and approved(r):
+        # the first approval on the current head is merge-ready from Implement or CodeAudit: no second hand-off (#87)
+        if r.stage == "Implement": r.clearance["Implement"] = {"review": rv["id"], "author": rv["login"], "head": head}
         r.clearance["CodeAudit"] = {"review": rv["id"], "author": rv["login"], "head": head}
         r.held.pop("Implement", None)
+        r.held.pop("CodeAudit", None)
         r.pr.pop("changes_requested", None)
-        actions += move(r, "Implement", next_stage(r, "CodeAudit") or "CodeAudit", ev.now, f"review-{rv['id']}", cfg)
+        actions += move(r, r.stage, next_stage(r, "CodeAudit") or "CodeAudit", ev.now, f"review-{rv['id']}", cfg)
     elif r.stage == "Implement" and "Implement" in r.held and r.pr.get("number"):
         h = r.held["Implement"]
         actions += clear(r, "Implement", h["sender"], h["text"], h["ts"], ev.now, cfg)
@@ -379,7 +391,7 @@ def mention_fix_text(r: Round, stage: str, nxt: str, author: str, link: str, due
 def board_action(r: Round, stage: str, nxt: str, nrole: str, ts: str, cfg: Config) -> Action | None:
     """Field-level board writes only (Status, Stage, Role, dates, assignee): never `sync_study`, never an issue-body edit (#49)."""
     if not r.issue: return None
-    assignee = r.login(nrole, cfg)
+    assignee = r.login("auditor" if nxt == "Merge" else nrole, cfg)  # at Merge the auditor stays assignee: there is no driver to hand to (#87)
     previous = r.login(ROUND_ROLE[stage], cfg)
     return Action("board_update", f"{r.thread}/round/{stage}-{nxt}/board/{ts}", {
         "thread": r.thread, "issue": r.issue, "repo": r.repo,

@@ -154,7 +154,7 @@ def closes(client: FakeClient) -> list[str]: return [t for _, t in client.posts 
 def test_three_job_wave_from_start_to_close_posts_the_close_once(tmp_path):
     store, client, gh, clock, drv = setup(tmp_path)
     first_half(store, client, gh, clock, drv)
-    assert [j.rnd().stage for j in stored(store).jobs] == ["CodeAudit"] * 3
+    assert [j.rnd().stage for j in stored(store).jobs] == ["Merge"] * 3  # #87: the first approval on the head moves CodeAudit to Merge
     second_half(store, client, gh, clock, drv)
     w = stored(store)
     assert all(j.merged for j in w.jobs) and w.closed_at == T0 + 6 * H and [j.merge_sha for j in w.jobs] == ["1" * 40, "2" * 40, "3" * 40]

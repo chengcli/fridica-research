@@ -335,8 +335,9 @@ def test_clearing_into_an_unheld_role_makes_no_holder_unset_post(world):
     drain(drv)
     r = rnd(store)
     assert r["stage"] == "Merge"
-    assert own_posts(server) == []  # nobody to mention: a post reading "(holder unset)" helps no one
-    assert len(r["findings"]) == 1 and "driver" in r["findings"][0]
+    posts = own_posts(server)  # #87: no "(holder unset)" post and no "no driver" finding, only the one "ready to merge"
+    assert len(posts) == 1 and "ready to merge" in posts[0] and "holder unset" not in posts[0]
+    assert r["findings"] == []
     assert r["misses"] == {}  # a roster gap is not the author's miss
 
 

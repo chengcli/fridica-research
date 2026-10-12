@@ -11,6 +11,7 @@ from __future__ import annotations
 import dataclasses
 import hashlib
 import json
+import os
 import re
 import threading
 from http.server import BaseHTTPRequestHandler, HTTPServer
@@ -73,9 +74,10 @@ class FakeInstruct:
 
 
 @pytest.fixture
-def control(tmp_path):
-    srv = FakeInstruct(str(tmp_path / "control.sock"))
-    yield srv, Client(tmp_path / "control.sock")
+def control(sock_dir):
+    sock = os.path.join(sock_dir, "c.sock")
+    srv = FakeInstruct(sock)
+    yield srv, Client(sock)
     srv.server.shutdown()
     srv.server.server_close()
 

@@ -34,7 +34,11 @@ recorded, and CodeAudit only on the auditor's latest review being APPROVED on th
 Slack SIGN-OFF is recorded on the PR but never clears. A held hand-off is replayed when its condition
 is met; the auditor's CHANGES_REQUESTED on the current head sends the round back to Implement.
 
-Out of this slice: the ETA ladder, merge and the queue, per-role AI opt-in execution.
+Slice 3 carries: a PR closed without merging is dropped with a finding and no stage move, so the next poll
+re-adopts; `adopt` raises a `RosterError` for a register error (`RegisterRosterError` is both). The ETA ladder
+is `ladder.step`, a separate pure module.
+
+Out of this slice: merge and the queue, per-role AI opt-in execution.
 """
 from __future__ import annotations
 
@@ -76,6 +80,10 @@ SLACK_ID = re.compile(r"^[UW][A-Z0-9]{2,}$")
 
 class RosterError(ValueError):
     """An adoption the driver must refuse: an unknown role, a bad Slack id, the owner as a holder, or AI delegation of a person-held role."""
+
+
+class RegisterRosterError(register_mod.RegisterError, RosterError):
+    """A register error at adoption: a `RosterError` to the driver, still a `RegisterError` to callers that catch that."""
 
 
 def round_key(thread: str) -> str: return f"round:{thread}"
@@ -223,7 +231,9 @@ def adopt(thread: str, *, issue: int | None, repo: str, roles: list[str], logins
     Adoption writes no board field and posts nothing: the first clearance does that."""
     if len(str(thread).split(":")) != 3: raise RosterError(f"{thread!r} is not a thread id (workspace:channel:root_ts)")
     if stage not in ORDER: raise RosterError(f"unknown stage {stage!r}; stages are {', '.join(ORDER)}")
-    roster = parse_roster(roles, logins or [], delegate or [], cfg.owner, register_mod.load_for(cfg))  # a register path that is set but missing raises here
+    try: reg = register_mod.load_for(cfg)  # a register path that is set but missing raises here
+    except register_mod.RegisterError as e: raise RegisterRosterError(str(e)) from e
+    roster = parse_roster(roles, logins or [], delegate or [], cfg.owner, reg)
     if not roster: raise RosterError("a round needs a roster: --role explorer=U… --role debater=U… …")
     if not roster.get(ROUND_ROLE[stage], {}).get("holders"): raise RosterError(f"stage {stage} needs a {ROUND_ROLE[stage]}: --role {ROUND_ROLE[stage]}=U…")
     rnd = Round(thread=thread, channel=str(thread).split(":")[1], issue=int(issue) if issue else None, repo=repo or "",
@@ -315,6 +325,11 @@ def polled(r: Round, ev: Event, cfg: Config) -> tuple[Round, list[Action]]:
     if ev.get("view"):
         v = ev["view"]
         r.pr.update({"head": v.get("headRefOid", r.pr.get("head", "")), "state": v.get("state", r.pr.get("state", "")), "draft": bool(v.get("isDraft", r.pr.get("draft")))})
+        if str(v.get("state", "")).upper() == "CLOSED" and not v.get("mergedAt"):
+            # closed without merging: drop it, keep the stage, and let the next poll adopt the implementer's next open PR
+            r.findings.append(f"{r.stage}: PR #{r.pr['number']} was closed without merging; dropped, stage not moved")
+            r.pr = {}
+            return r, []
     if ev.get("reviews") is not None:
         auditors = {r.login("auditor", cfg).lower()} - {""}
         verdicts = [v for k, v in latest_verdicts(ev["reviews"]).items() if k in auditors]

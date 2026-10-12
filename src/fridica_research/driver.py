@@ -23,6 +23,7 @@ from .store import Store
 
 log = logging.getLogger("fridica_research.driver")
 LlmRunner = Callable[[str, str], dict]  # (schema name, prompt) -> payload
+GH_FAILING_PASSES = 3  # consecutive wave polling passes with a failed GitHub read before the owner is told (#85)
 
 
 def claude_runner(model: str = "haiku", run=subprocess.run) -> LlmRunner:
@@ -58,6 +59,8 @@ class Driver:
         self.github = github  # github.GitHub when `[github] enabled` (R21, R23, R24); None keeps Slack-only sign-offs
         self.recovered = False
         self.producer = provenance.running_revision()
+        self.last_poll: dict[tuple[str, int], float] = {}  # (wave thread, job) -> when its PR was last read (#85)
+        self.gh_failures: dict[str, int] = {}  # wave thread -> consecutive passes with a failed read (#85)
 
     # -- translation --------------------------------------------------------------
     def translate(self, e: dict) -> list[tuple[str, Event]]:
@@ -75,6 +78,7 @@ class Driver:
             text = e.get("text") or ""
             if state is None:
                 if e.get("ts") != e.get("thread") or e["channel"]["id"] not in self.cfg.channels: return []
+                if own and (contracts.ref_of(text) or "").startswith("fm-"): return []  # #79: a floor manager's root is never a study
                 if not (meta_kind == "study_root" or (own and self.cfg.starters == ()) or e.get("sender") in self.cfg.starters): return []
                 root = contracts.parse_root(text)
                 gen = root.generation if root.generation is not None else (1 if own else self.cfg.max_generations)
@@ -272,11 +276,13 @@ class Driver:
         where = thread or rnd.thread
         log.info("%s %s %s", where, a.kind, a.id)
         try:
+            if a.kind in ("post", "notify_owner"):
+                seen = self.posted_with_ref(where, a.id)
+                if seen is None: return f"{a.kind} {a.id} skipped: the ref probe failed"  # #85: unknown, so no send this pass
+                if seen: return None  # restart: the post is already in the thread
             if a.kind == "post":
-                if self.posted_with_ref(where, a.id): return None  # restart: the post is already in the thread
                 self.client.post_message(where, contracts.PostRequest(a["post_kind"], a["text"]))
             elif a.kind == "notify_owner":
-                if self.posted_with_ref(where, a.id): return None
                 self.client.post_message(where, contracts.PostRequest("report", f"<@{self.cfg.owner}> {a['text']}\nref: {a.id}"))
             elif a.kind == "board_update":
                 self.board_fields(a)
@@ -332,18 +338,25 @@ class Driver:
             if w is not None and (w.pending or any(j.round.get("pending") for j in w.jobs)): self.drain_wave(w)
 
     def poll_waves(self):
-        """One `read_pr` per open job per pass; a merged job is never polled. A PR read as MERGED is fed as a `merged` event."""
+        """One `read_pr` per open job at most every `github.poll_interval` (#85); a merged job is never polled.
+        A PR read as MERGED is fed as a `merged` event. A pass with any failed read counts against the wave and a
+        clean one resets the count; the third failing pass in a row puts one notify on `Wave.pending`."""
         run = self.gh_runner()
         if run is None: return
         for thread in self.waves():
             w = self.load_wave(thread)
             if w is None: continue
+            reads, error = 0, None
             for n, j in enumerate(w.jobs, 1):
                 rnd = j.rnd()
                 if j.merged or not rnd.repo or not rnd.issue: continue
+                now = self.clock()
+                if now < self.last_poll.get((thread, n), float("-inf")) + self.cfg.github.poll_interval: continue
+                self.last_poll[(thread, n)], reads = now, reads + 1
                 try: ev = self.read_pr(rnd, run)
                 except Exception as e:  # noqa: BLE001 - a GitHub read never stalls a wave; the next pass reads again
                     log.warning("pr read for wave %s job %d failed: %s", thread, n, e)
+                    error = error or e
                     continue
                 if ev is None: continue
                 view = ev.get("view") or {}
@@ -351,6 +364,20 @@ class Driver:
                     ev = Event("merged", ev.now, {"job": n, "pr": rnd.pr["number"], "sha": str((view.get("mergeCommit") or {}).get("oid") or "")})
                 else: ev = Event(ev.kind, ev.now, {**ev.data, "job": n})
                 w = self.wave_event(w, ev)
+            if reads: self.count_gh_failure(w, error)
+
+    def count_gh_failure(self, w: wave_mod.Wave, error: Exception | None):
+        """#85: consecutive failing passes per wave; at the third, one durable notify (`ref: fm-wave-<name>-gh-failing`)."""
+        if error is None:
+            self.gh_failures.pop(w.thread, None)
+            return
+        k = self.gh_failures[w.thread] = self.gh_failures.get(w.thread, 0) + 1
+        if k != GH_FAILING_PASSES: return
+        ref = f"fm-wave-{w.name}-gh-failing"
+        text = f"GitHub reads failing for wave {w.name} ({k} passes in a row): {str(error)[:200]}"
+        w.pending = w.pending + [Action("notify_owner", ref, {"thread": w.thread, "text": text}).to_dict()]
+        self.save_wave(w)
+        self.drain_wave(w)
 
     def gh_runner(self):
         """The gh runner a round's PR is read with: the GitHub one when `[github]` is on, else the enabled board's; None reads nothing."""
@@ -386,12 +413,13 @@ class Driver:
         pr = f"{rnd.repo}#{rnd.pr['number']}"
         return Event("pr_polled", now, {"view": github.view_pr(run, pr), "reviews": github.pr_reviews(run, pr)})
 
-    def posted_with_ref(self, thread: str, ref: str) -> bool:
-        """The `ref:` probe `recover` uses, applied before every arbiter post: re-feeding an event never posts twice."""
+    def posted_with_ref(self, thread: str, ref: str) -> bool | None:
+        """The `ref:` probe `recover` uses, applied before every arbiter post: re-feeding an event never posts twice.
+        None when the probe failed: whether the post is there is unknown, so the caller skips the send (#85)."""
         try: return self.client.thread(thread).own_post_with_ref(ref, self.cfg.owner) is not None
         except ControlError as e:
             log.warning("cannot probe %s for %s: %s", thread, ref, e)
-            return False
+            return None
 
     def board_fields(self, a: Action):
         """R47.2 board writes: Status, Stage, Role, dates and the assignee, field by field. Never `sync_study`, never `--body` (#49)."""
@@ -430,6 +458,7 @@ class Driver:
         try: page = self.client.events(self.store.cursor, 1000)
         except Unavailable as e:
             log.warning("daemon unavailable: %s", e)
+            self.poll_waves()  # #85: a Slack outage does not stop merge detection
             return 0, True
         n = 0
         events = page.get("events", [])

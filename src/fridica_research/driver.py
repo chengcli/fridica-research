@@ -15,7 +15,7 @@ import subprocess
 import time
 from typing import Callable
 
-from . import arbiter, briefs, contracts, machine, provenance
+from . import arbiter, briefs, contracts, github, machine, provenance
 from .client import Client, ControlError, Unavailable
 from .config import Config
 from .machine import Action, Event, State
@@ -283,6 +283,40 @@ class Driver:
             return f"{a.kind} {a.id} refused: {e}"
         return None
 
+    def gh_runner(self):
+        """The gh runner a round's PR is read with: the GitHub one when `[github]` is on, else the enabled board's; None reads nothing."""
+        if self.github is not None: return self.github.run
+        return self.board.api.run if self.board is not None and self.cfg.board.enabled and getattr(self.board, "api", None) is not None else None
+
+    def poll_rounds(self):
+        """#46 slice 2: one PR read per round per pass while the stage is Implement or CodeAudit -- `gh pr list`
+        before adoption, then `gh pr view` plus the reviews call -- fed to the arbiter as a `pr_polled` event.
+        A failed read is logged and retried on the next pass."""
+        run = self.gh_runner()
+        if run is None: return
+        for thread in self.store.rounds():
+            rnd = self.load_round(thread)
+            if rnd is None or rnd.stage not in arbiter.PR_STAGES or not rnd.repo or not rnd.issue: continue
+            try: ev = self.read_pr(rnd, run)
+            except Exception as e:  # noqa: BLE001 - a GitHub read never stalls a round; the next pass reads again
+                log.warning("pr read for round %s failed: %s", thread, e)
+                continue
+            if ev is None: continue
+            rnd, actions = arbiter.observe(rnd, ev, self.cfg)
+            self.save_round(rnd)
+            self.drain_pending(rnd)
+            for a in actions:
+                if a.kind not in arbiter.DURABLE: self.execute_round(rnd, a)
+
+    def read_pr(self, rnd: arbiter.Round, run) -> Event | None:
+        now = self.clock()
+        if not rnd.pr.get("number"):
+            me = rnd.login("implementer", self.cfg)
+            if not me: return None  # whose PR is "own" is unknown: nothing to adopt
+            return Event("pr_polled", now, {"prs": github.list_prs(run, rnd.repo, me)})
+        pr = f"{rnd.repo}#{rnd.pr['number']}"
+        return Event("pr_polled", now, {"view": github.view_pr(run, pr), "reviews": github.pr_reviews(run, pr)})
+
     def posted_with_ref(self, thread: str, ref: str) -> bool:
         """The `ref:` probe `recover` uses, applied before every arbiter post: re-feeding an event never posts twice."""
         try: return self.client.thread(thread).own_post_with_ref(ref, self.cfg.owner) is not None
@@ -341,6 +375,7 @@ class Driver:
                 n += 1
         self.store.set_cursor(int(page["next"]))
         self.fire_timers()
+        self.poll_rounds()
         self.poll_github()
         return n, int(page.get("scanned", 0)) < 1000
 

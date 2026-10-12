@@ -27,8 +27,14 @@ Idempotence: every post carries a deterministic `ref:` line recorded in `posted_
 ignores a message ts it has already seen, and the driver probes the thread by `ref:` before
 posting, the way `Driver.recover` does.
 
-Out of this slice: PR adoption and polling, the ETA ladder, merge and the queue, per-role AI
-opt-in execution.
+Slice 2 (PR adoption and polling): the driver reads the round's PR once per pass while the stage is
+Implement or CodeAudit and feeds it in as a `pr_polled` event. The round adopts the implementer's own
+open PR (drafts too) whose body has `Closes #N` or `Refs #N`; Implement clears only once a PR is
+recorded, and CodeAudit only on the auditor's latest review being APPROVED on the current head. A
+Slack SIGN-OFF is recorded on the PR but never clears. A held hand-off is replayed when its condition
+is met; the auditor's CHANGES_REQUESTED on the current head sends the round back to Implement.
+
+Out of this slice: the ETA ladder, merge and the queue, per-role AI opt-in execution.
 """
 from __future__ import annotations
 
@@ -38,7 +44,9 @@ import json
 import re
 from dataclasses import dataclass, field
 
+from . import contracts
 from .config import Config
+from .github import latest_verdicts
 from .machine import Action, Event
 
 ORDER = ("Explore", "Debate", "DesignAudit", "Implement", "CodeAudit", "Merge")
@@ -48,6 +56,7 @@ BUDGET_KEY = {"Explore": "explore", "Debate": "debate", "DesignAudit": "design_a
 ACTION_KINDS = ("post", "notify_owner", "board_update")  # the arbiter emits nothing else: no delegate, set_driver, llm_call, stop_worker or arm_timer
 DURABLE = ("post", "notify_owner")  # kinds the fold records in `Round.pending`: losing one loses the record, so they are re-emitted until the daemon takes them
 SEEN_KEEP = 200  # message timestamps kept for the re-feed check
+PR_STAGES = ("Implement", "CodeAudit")  # the stages whose round has its PR read once per pass
 
 # A hand-off marker is required, so a plain progress post never clears a stage (design audit A3). The
 # crew writes hand-offs both ways, "handing off" and "over to <holder>", so both forms count. The marker
@@ -127,7 +136,8 @@ class Round:
     posted_refs: list[str] = field(default_factory=list)
     seen: list[str] = field(default_factory=list)
     pending: list[dict] = field(default_factory=list)  # durable actions the daemon has not taken yet; cleared only on a successful send
-    pr: dict = field(default_factory=dict)  # slice 2
+    pr: dict = field(default_factory=dict)  # slice 2: {number, head, state, draft, review, changes_requested, signoffs}
+    held: dict[str, dict] = field(default_factory=dict)  # stage -> {ts, sender, text}: a hand-off held until its PR condition is met
 
     def holders(self, role: str) -> list[str]: return list((self.roster.get(role) or {}).get("holders") or [])
     def login(self, role: str, cfg: Config | None = None) -> str:
@@ -173,6 +183,35 @@ def parse_roster(roles: list[str], logins: list[str], delegate: list[str], owner
     return roster
 
 
+# -- the round's PR (slice 2) ------------------------------------------------------------
+def closes_or_refs(body: str, issue: int | None, repo: str) -> bool:
+    """`Closes #N` or `Refs #N` as a whole word (`#4` and `#460` never match `#46`); `owner/repo#N` counts only for the round's own repo."""
+    if not issue: return False
+    for m in re.finditer(r"\b(?:closes|refs)\s+(?:(?P<repo>[\w.-]+/[\w.-]+))?#(?P<n>\d+)(?![\w-])", body or "", re.I):
+        if int(m.group("n")) == int(issue) and (not m.group("repo") or m.group("repo").lower() == (repo or "").lower()): return True
+    return False
+
+
+def pick_pr(r: Round, prs: list[dict], cfg: Config | None = None) -> dict | None:
+    """The implementer's own open PR on the round's repo (drafts too) whose body closes or refers to the issue; the oldest wins."""
+    me = r.login("implementer", cfg).lower()
+    ok = [p for p in prs or [] if me and str((p.get("author") or {}).get("login", "")).lower() == me
+          and str(p.get("state", "OPEN")).upper() == "OPEN" and closes_or_refs(p.get("body") or "", r.issue, r.repo)]
+    return min(ok, key=lambda p: int(p["number"])) if ok else None
+
+
+def approved(r: Round) -> bool:
+    """The auditor's latest verdict is APPROVED on the PR's current head; a head change makes it stale."""
+    rv = r.pr.get("review") or {}
+    return bool(r.pr.get("number")) and rv.get("state") == "APPROVED" and bool(rv.get("commit")) and rv.get("commit") == r.pr.get("head")
+
+
+def hold_reason(r: Round, stage: str) -> str:
+    if stage == "Implement" and not r.pr.get("number"): return "no PR is recorded for the round yet"
+    if stage == "CodeAudit" and not approved(r): return "the auditor's latest GitHub review is not APPROVED on the current head"
+    return ""
+
+
 def adopt(thread: str, *, issue: int | None, repo: str, roles: list[str], logins: list[str] | None = None,
           delegate: list[str] | None = None, stage: str = ORDER[0], now: float, cfg: Config) -> tuple[Round, list[Action]]:
     """The driver adopts one thread. Keyed per thread, never per channel (the `issue:<channel>` leak at cli.py:38).
@@ -192,6 +231,7 @@ def adopt(thread: str, *, issue: int | None, repo: str, roles: list[str], logins
 def observe(rnd: Round, ev: Event, cfg: Config) -> tuple[Round, list[Action]]:
     """One thread event -> the next round and the actions the driver executes. Pure; `ev.now` is the only clock."""
     r = copy.deepcopy(rnd)
+    if ev.kind == "pr_polled": return polled(r, ev, cfg)
     if ev.kind != "crew_post": return r, []  # L3.1: a time event never advances, stops, closes, retries or delivers
     ts = str(ev.get("ts") or "")
     if ts and ts in r.seen: return r, []  # the same event again: never a second post, never a second advance
@@ -199,28 +239,43 @@ def observe(rnd: Round, ev: Event, cfg: Config) -> tuple[Round, list[Action]]:
     text = str(ev.get("text") or "")
     sender = str(ev.get("sender") or "")
     if sender == cfg.owner or _ref_of(text) in r.posted_refs: return r, []  # the arbiter's own echo never clears a stage
+    so = contracts.parse_signoff(text)
+    if so is not None:  # recorded on the PR, never a clearance: CodeAudit clears on the GitHub review alone
+        r.pr["signoffs"] = (r.pr.get("signoffs") or []) + [{"ts": ts, "sender": sender, "pr": so.pr, "sha": so.sha, "verdict": so.verdict}]
     if not HANDOFF_MARK.search(text): return r, []  # a progress post is not a hand-off
     stage = r.stage
     nxt = next_stage(r, stage)
     if nxt is None: return r, []  # the merge stage closes the round; merging is a later slice
-    role, nrole = ROUND_ROLE[stage], ROUND_ROLE[nxt]
+    role = ROUND_ROLE[stage]
     if sender not in r.holders(role):
         r.findings.append(f"{stage}: hand-off from {sender}, who does not hold {role}; stage not cleared")
         return r, []  # the off-role reminder is a later slice
-    link = LINK.search(text)
-    if not link:
+    if not LINK.search(text):
         r.findings.append(f"{stage}: hand-off from {sender} carries no link; stage not cleared")
         return r, []
-    due = DUE.search(text)
-    if not due:
+    if not DUE.search(text):
         r.findings.append(f"{stage}: hand-off from {sender} carries no due time (expected `Due MM-DD HH:MM ET`); stage not cleared")
         return r, []
+    why = hold_reason(r, stage)
+    if why:  # held silently: replayed by the PR poll that meets the condition
+        r.findings.append(f"{stage}: hand-off from {sender} held: {why}")
+        r.held[stage] = {"ts": ts, "sender": sender, "text": text}
+        return r, []
+    actions = clear(r, stage, sender, text, ts, ev.now, cfg)
+    r.pending = r.pending + [a.to_dict() for a in actions if a.kind in DURABLE]
+    return r, actions
 
+
+def clear(r: Round, stage: str, sender: str, text: str, ts: str, now: float, cfg: Config) -> list[Action]:
+    """A valid hand-off clears `stage`: the mention fix if it is needed, the move, the board writes, and the durable intent."""
+    nxt = next_stage(r, stage)
+    nrole = ROUND_ROLE[nxt]
+    link, due = LINK.search(text), DUE.search(text)
     actions: list[Action] = []
     mentioned = set(MENTION.findall(text))
     next_holders = r.holders(nrole)
     has_mention = bool(mentioned & set(next_holders))
-    rebased = ev.now + budget(cfg, nxt)
+    rebased = now + budget(cfg, nxt)
     if not has_mention and not next_holders:
         # Nobody holds the next role, so there is no mention to add: a post naming no one helps no one.
         # That is a gap in the roster the driver adopted with, not a miss by the hand-off's author.
@@ -234,11 +289,58 @@ def observe(rnd: Round, ev: Event, cfg: Config) -> tuple[Round, list[Action]]:
             actions.append(Action("post", ref, {"thread": r.thread, "post_kind": "report", "text": mention_fix_text(r, stage, nxt, sender, link.group(0), rebased, ref)}))
 
     r.clearance[stage] = {"handoff_ts": ts, "author": sender, "link": link.group(0), "due_text": due.group("when"), "mention": has_mention}
-    r.stage, r.stage_started, r.due = nxt, ev.now, rebased
-    board = board_action(r, stage, nxt, nrole, ts, cfg)
-    if board is not None: actions.append(board)
-    # A5, restart half: what must reach the thread is recorded on the round before the driver sends anything,
-    # so a crash between the save and the send, or a post the daemon refuses, is re-emitted rather than lost.
+    r.held.pop(stage, None)
+    actions += move(r, stage, nxt, now, ts, cfg)
+    return actions
+
+
+def move(r: Round, stage: str, nxt: str, now: float, key: str, cfg: Config) -> list[Action]:
+    """Stage, start and due move at once; the board follows; durable actions go on `pending` before anything is sent (A5)."""
+    r.stage, r.stage_started, r.due = nxt, now, now + budget(cfg, nxt)
+    board = board_action(r, stage, nxt, ROUND_ROLE[nxt], key, cfg)
+    return [board] if board is not None else []
+
+
+def polled(r: Round, ev: Event, cfg: Config) -> tuple[Round, list[Action]]:
+    """One PR read: adoption from `prs` (gh pr list), or the recorded PR's `view` and `reviews`."""
+    actions: list[Action] = []
+    if not r.pr.get("number"):
+        p = pick_pr(r, ev.get("prs") or [], cfg)
+        if p is None: return r, []
+        r.pr.update({"number": int(p["number"]), "head": p.get("headRefOid", ""), "state": p.get("state", "OPEN"), "draft": bool(p.get("isDraft"))})
+    if ev.get("view"):
+        v = ev["view"]
+        r.pr.update({"head": v.get("headRefOid", r.pr.get("head", "")), "state": v.get("state", r.pr.get("state", "")), "draft": bool(v.get("isDraft", r.pr.get("draft")))})
+    if ev.get("reviews") is not None:
+        auditors = {r.login("auditor", cfg).lower()} - {""}
+        verdicts = [v for k, v in latest_verdicts(ev["reviews"]).items() if k in auditors]
+        rv = max(verdicts, key=lambda v: (v["at"], v["n"])) if verdicts else None
+        r.pr["review"] = {"id": rv["id"], "state": rv["state"], "commit": rv["commit"], "login": rv["login"]} if rv else {}
+    rv, head = r.pr.get("review") or {}, r.pr.get("head")
+    if r.stage == "CodeAudit" and rv.get("state") == "CHANGES_REQUESTED" and rv.get("commit") == head and r.pr.get("changes_requested") != rv["id"]:
+        r.pr["changes_requested"] = rv["id"]
+        r.held.pop("CodeAudit", None)
+        ref = f"{r.thread}/round/changes/{rv['id']}"
+        actions += move(r, "CodeAudit", "Implement", ev.now, f"review-{rv['id']}", cfg)
+        if ref not in r.posted_refs:
+            r.posted_refs.append(ref)
+            who = " ".join(f"<@{h}>" for h in r.holders("implementer")) or "(holder unset)"
+            actions.insert(0, Action("post", ref, {"thread": r.thread, "post_kind": "report", "text": "\n".join([
+                f"{who} the auditor requested changes on PR #{r.pr['number']} at {str(head)[:12]}; the round is back in Implement.",
+                due_line(r.due), f"ref: {ref}"])}))
+    elif r.stage == "CodeAudit" and approved(r) and "CodeAudit" in r.held:
+        h = r.held["CodeAudit"]
+        actions += clear(r, "CodeAudit", h["sender"], h["text"], h["ts"], ev.now, cfg)
+    elif r.stage == "Implement" and approved(r) and r.pr.get("changes_requested"):
+        # back in Implement after changes were requested: the approval clears through CodeAudit, no second hand-off
+        r.clearance["Implement"] = {"review": rv["id"], "author": rv["login"], "head": head}
+        r.clearance["CodeAudit"] = {"review": rv["id"], "author": rv["login"], "head": head}
+        r.held.pop("Implement", None)
+        r.pr.pop("changes_requested", None)
+        actions += move(r, "Implement", next_stage(r, "CodeAudit") or "CodeAudit", ev.now, f"review-{rv['id']}", cfg)
+    elif r.stage == "Implement" and "Implement" in r.held and r.pr.get("number"):
+        h = r.held["Implement"]
+        actions += clear(r, "Implement", h["sender"], h["text"], h["ts"], ev.now, cfg)
     r.pending = r.pending + [a.to_dict() for a in actions if a.kind in DURABLE]
     return r, actions
 

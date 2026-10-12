@@ -45,6 +45,11 @@ HANDOFF_NO_DUE = f"Stage: Explore handoff to the debater.\n<@{DEBATER}> take it.
 PROGRESS = f"Still reading the inventory, <@{DEBATER}> for visibility.\n{LINK}\nDue 10-11 16:00 ET"
 
 
+HEAD = "a" * 40
+APPROVED_PR = {"number": 70, "head": HEAD, "state": "OPEN", "draft": False,  # #46 slice 2: CodeAudit clears only on this
+               "review": {"id": "9001", "state": "APPROVED", "commit": HEAD, "login": "aud"}}
+
+
 def round_meta(stage: str = "Explore", now: float = T0, **kw) -> str:
     """The round `adopt` writes: per thread, explicit roster, no delegation anywhere."""
     r = {
@@ -161,9 +166,11 @@ def test_board_writes_are_field_level_and_never_touch_the_body(world):
     ("CodeAudit", AUDITOR, "Merge", DRIVER, "O_Deliver", "R_driver"),
 ])
 def test_code_audit_and_merge_map_onto_the_boards_stage_options(world, stage, holder, nxt, mention, stage_option, role_option):
-    """The board's Stage field has no CodeAudit or Merge option (board.STAGE_OPTIONS), so they map onto Audit and Deliver."""
+    """The board's Stage field has no CodeAudit or Merge option (board.STAGE_OPTIONS), so they map onto Audit and Deliver.
+
+    Slice 2: Implement clears only with a recorded PR, and CodeAudit only with the auditor's approval of its head."""
     server, cfg = world
-    store, calls = adopted(cfg, round_meta(stage=stage))
+    store, calls = adopted(cfg, round_meta(stage=stage, pr=APPROVED_PR))
     drv, gh = make(cfg, store, Clock(), calls)
     server.message(THREAD, holder, f"Handoff to {nxt}: <@{mention}> over to you.\n{LINK}\nDue 10-12 09:00 ET")
     drain(drv)
@@ -322,7 +329,7 @@ def test_clearing_into_an_unheld_role_makes_no_holder_unset_post(world):
     server, cfg = world
     roster = json.loads(round_meta())["roster"]
     roster.pop("driver")
-    store, calls = adopted(cfg, round_meta(stage="CodeAudit", roster=roster))
+    store, calls = adopted(cfg, round_meta(stage="CodeAudit", roster=roster, pr=APPROVED_PR))  # slice 2: an approved PR is recorded
     drv, _ = make(cfg, store, Clock(), calls)
     server.message(THREAD, AUDITOR, f"Code audit done, handoff: {LINK}\nDue 10-12 09:00 ET")
     drain(drv)

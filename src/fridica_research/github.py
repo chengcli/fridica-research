@@ -102,6 +102,31 @@ def latest_verdicts(reviews: list[dict]) -> dict[str, dict]:
     return out
 
 
+LIST_FIELDS = "number,headRefOid,state,isDraft,author,body"  # what adoption of a round's PR reads (#46 slice 2)
+
+
+def list_prs(run: Runner, repo: str, author: str) -> list[dict]:
+    """The open PRs of `author` on `repo`, drafts included: the candidates a round adopts from."""
+    return json.loads(run(["gh", "pr", "list", "-R", repo, "--author", author, "--state", "open", "--json", LIST_FIELDS], None) or "[]")
+
+
+def view_pr(run: Runner, pr: str) -> dict:
+    repo, n = contracts.pr_id(pr)
+    return json.loads(run(["gh", "pr", "view", n, "-R", repo, "--json", PR_FIELDS], None))
+
+
+def pr_reviews(run: Runner, pr: str) -> list[dict]:
+    """Every submitted review of the PR from REST, which carries `commit_id` (`gh pr view --json latestReviews` leaves the commit oid and id empty)."""
+    repo, n = contracts.pr_id(pr)
+    pages = json_values(run(["gh", "api", "--paginate", f"repos/{repo}/pulls/{n}/reviews?per_page=100"], None))
+    out = []
+    for r in (r for page in pages for r in (page if isinstance(page, list) else [page])):
+        if not r.get("submitted_at"): continue  # a pending review
+        u = r.get("user") or {}
+        out.append({"id": str(r.get("id", "")), "n": int(r.get("id") or 0), "login": str(u.get("login", "")), "type": str(u.get("type", "")), "state": r.get("state"), "commit": r.get("commit_id") or "", "at": r["submitted_at"], "body": r.get("body") or ""})
+    return sorted(out, key=lambda r: (r["at"], r["n"]))
+
+
 class GitHub:
     def __init__(self, cfg: Config, runner: Runner | None = None, remember=lambda k, v: None, recall=lambda k: None):
         self.cfg, self.g = cfg, cfg.github
@@ -113,20 +138,8 @@ class GitHub:
     def api(self, method: str, path: str, body: dict | None = None) -> str:
         return self.run(["gh", "api", "-X", method, path, *(["--input", "-"] if body is not None else [])], json.dumps(body) if body is not None else None)
 
-    def view(self, pr: str) -> dict:
-        repo, n = contracts.pr_id(pr)
-        return json.loads(self.run(["gh", "pr", "view", n, "-R", repo, "--json", PR_FIELDS], None))
-
-    def reviews(self, pr: str) -> list[dict]:
-        """Every submitted review of the PR from REST, which carries `commit_id` (`gh pr view --json latestReviews` leaves the commit oid and id empty)."""
-        repo, n = contracts.pr_id(pr)
-        pages = json_values(self.run(["gh", "api", "--paginate", f"repos/{repo}/pulls/{n}/reviews?per_page=100"], None))
-        out = []
-        for r in (r for page in pages for r in (page if isinstance(page, list) else [page])):
-            if not r.get("submitted_at"): continue  # a pending review
-            u = r.get("user") or {}
-            out.append({"id": str(r.get("id", "")), "n": int(r.get("id") or 0), "login": str(u.get("login", "")), "type": str(u.get("type", "")), "state": r.get("state"), "commit": r.get("commit_id") or "", "at": r["submitted_at"], "body": r.get("body") or ""})
-        return sorted(out, key=lambda r: (r["at"], r["n"]))
+    def view(self, pr: str) -> dict: return view_pr(self.run, pr)
+    def reviews(self, pr: str) -> list[dict]: return pr_reviews(self.run, pr)
 
     def is_bot(self, author: dict | None) -> bool:
         a = author or {}

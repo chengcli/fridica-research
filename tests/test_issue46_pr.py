@@ -1,7 +1,7 @@
 """#46 slice 2: PR adoption and polling for an adopted round (ref fm-wave-c-job1).
 
 The round adopts the implementer's own open PR (drafts too) whose body has `Closes #N` or `Refs #N` as a
-whole word; the PR is read once per pass while the stage is Implement or CodeAudit. Implement clears only
+whole word; the PR is read at most once per `github.poll_interval` while the stage is Implement or CodeAudit. Implement clears only
 with a recorded PR, CodeAudit only on the auditor's latest review being APPROVED on the current head; a
 Slack SIGN-OFF is recorded but never clears; CHANGES_REQUESTED on the head sends the round back to
 Implement with one post keyed by review id, and a later approval clears through CodeAudit.
@@ -56,6 +56,11 @@ def review(rid: int, login: str, state: str, commit: str, at: str) -> dict:
     return {"id": rid, "user": {"login": login, "type": "User"}, "state": state, "commit_id": commit, "submitted_at": at, "body": ""}
 
 
+def later(drv):
+    """The next poll of the round's PR is due: #85 reads a round at most every `github.poll_interval`."""
+    drv.clock.t += drv.cfg.github.poll_interval
+
+
 RECORDED = {"number": 70, "head": OLD, "state": "OPEN", "draft": False}
 
 
@@ -90,10 +95,14 @@ def test_one_read_per_round_per_pass_and_only_in_implement_or_code_audit(world):
     drv.run_once()
     assert gh.reads() == ["gh pr list"]  # before adoption: the list only
     drv.run_once()
+    assert gh.reads() == ["gh pr list"]  # #85: not due again inside poll_interval
+    later(drv)
+    drv.run_once()
     assert gh.reads() == ["gh pr list", "gh pr view", "gh api --paginate"]  # after: view plus reviews, once
     r = json.loads(store.get_meta(f"round:{THREAD}"))
     r["stage"] = "Merge"
     store.set_meta(f"round:{THREAD}", json.dumps(r))
+    later(drv)
     drv.run_once()
     assert len(gh.reads()) == 3  # Merge is not polled
 
@@ -104,6 +113,7 @@ def test_a_failed_read_is_logged_and_retried_next_pass(world, caplog):
     gh.fail_once = "pr list"
     drv.run_once()
     assert rnd(store)["pr"] == {} and "pr read for round" in caplog.text
+    later(drv)
     drv.run_once()
     assert rnd(store)["pr"]["number"] == 82
 
@@ -117,6 +127,7 @@ def test_implement_handoff_is_held_until_a_pr_is_recorded(world):
     assert r["stage"] == "Implement" and "Implement" in r["held"]
     assert any("held" in f and "no PR" in f for f in r["findings"]) and own_posts(server) == []
     gh.prs = [pr(82, "imp", f"Refs #{ISSUE}")]
+    later(drv)
     drain(drv)
     r = rnd(store)
     assert r["pr"]["number"] == 82 and r["stage"] == "CodeAudit" and r["held"] == {}
@@ -137,6 +148,7 @@ def test_code_audit_clears_only_on_the_auditors_approval_of_the_current_head(wor
     assert any("held" in f and "APPROVED" in f for f in r["findings"])
     assert own_posts(server) == []  # held silently
     gh.reviews.append(review(3, "aud", "APPROVED", NEW, "2026-10-11T12:00:00Z"))
+    later(drv)
     drain(drv)
     r = rnd(store)
     assert r["stage"] == "Merge" and r["held"] == {} and r["clearance"]["CodeAudit"]["author"] == AUDITOR  # the held hand-off replayed
@@ -147,13 +159,16 @@ def test_code_audit_clears_only_on_the_auditors_approval_of_the_current_head(wor
 def test_changes_requested_sends_the_round_back_once_and_an_approval_then_clears_through(world):
     server, store, drv, gh = setup(world, "CodeAudit", RECORDED)
     gh.reviews = [review(5, "aud", "CHANGES_REQUESTED", OLD, "2026-10-11T10:00:00Z")]
-    for _ in range(3): drain(drv)
+    for _ in range(3):
+        later(drv)
+        drain(drv)
     r = rnd(store)
     assert r["stage"] == "Implement" and r["pr"]["changes_requested"] == "5"
     posts = own_posts(server)
     assert len(posts) == 1 and f"<@{IMPLEMENTER}>" in posts[0] and f"ref: {THREAD}/round/changes/5" in posts[0]
     gh.head = NEW
     gh.reviews.append(review(6, "aud", "APPROVED", NEW, "2026-10-11T12:00:00Z"))
+    later(drv)
     drain(drv)
     r = rnd(store)
     assert r["stage"] == "Merge" and r["clearance"]["CodeAudit"]["review"] == "6"  # cleared through, no second hand-off

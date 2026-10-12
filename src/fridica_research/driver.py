@@ -60,7 +60,9 @@ class Driver:
         self.recovered = False
         self.producer = provenance.running_revision()
         self.last_poll: dict[tuple[str, int], float] = {}  # (wave thread, job) -> when its PR was last read (#85)
-        self.gh_failures: dict[str, int] = {}  # wave thread -> consecutive passes with a failed read (#85)
+        self.gh_failures: dict[str, int] = {}  # wave thread -> consecutive passes with a failed read (#85); memory only, never the store
+        self.round_polled: dict[str, float] = {}  # round thread -> when its PR was last read (#85)
+        self.reviews_requested: set[tuple[str, int, str]] = set()  # (wave thread, job, head) whose auditor review was requested (#88)
 
     # -- translation --------------------------------------------------------------
     def translate(self, e: dict) -> list[tuple[str, Event]]:
@@ -338,18 +340,20 @@ class Driver:
             if w is not None and (w.pending or any(j.round.get("pending") for j in w.jobs)): self.drain_wave(w)
 
     def poll_waves(self):
-        """One `read_pr` per open job at most every `github.poll_interval` (#85); a merged job is never polled.
-        A PR read as MERGED is fed as a `merged` event. A pass with any failed read counts against the wave and a
-        clean one resets the count; the third failing pass in a row puts one notify on `Wave.pending`."""
+        """One `read_pr` per open job at most every `github.poll_interval` (#85); a merged or dropped job and a closed
+        wave are never polled (#93). A PR read as MERGED is fed as a `merged` event; with no PR adopted, a MERGED PR
+        that references the issue is too (#91). A pass with any failed read counts against the wave and a clean one
+        resets the count; the third failing pass in a row puts one notify on `Wave.pending`. Each new head of an
+        open PR gets the auditor's review requested (#88)."""
         run = self.gh_runner()
         if run is None: return
         for thread in self.waves():
             w = self.load_wave(thread)
-            if w is None: continue
+            if w is None or w.closed_at is not None: continue
             reads, error = 0, None
             for n, j in enumerate(w.jobs, 1):
                 rnd = j.rnd()
-                if j.merged or not rnd.repo or not rnd.issue: continue
+                if j.terminal or not rnd.repo or not rnd.issue: continue
                 now = self.clock()
                 if now < self.last_poll.get((thread, n), float("-inf")) + self.cfg.github.poll_interval: continue
                 self.last_poll[(thread, n)], reads = now, reads + 1
@@ -362,9 +366,46 @@ class Driver:
                 view = ev.get("view") or {}
                 if view.get("state") == "MERGED":
                     ev = Event("merged", ev.now, {"job": n, "pr": rnd.pr["number"], "sha": str((view.get("mergeCommit") or {}).get("oid") or "")})
+                elif "prs" in ev.data and arbiter.pick_pr(rnd, ev.get("prs") or [], self.cfg) is None:
+                    try: ev = self.unwatched_merge(rnd, run, ev, n)
+                    except Exception as e:  # noqa: BLE001 - as a failed read: counted, and read again on the next pass
+                        log.warning("issue PR lookup for wave %s job %d failed: %s", thread, n, e)
+                        error = error or e
+                        continue
                 else: ev = Event(ev.kind, ev.now, {**ev.data, "job": n})
                 w = self.wave_event(w, ev)
+                self.request_review(w, n, run)
             if reads: self.count_gh_failure(w, error)
+
+    def unwatched_merge(self, rnd: arbiter.Round, run, ev: Event, n: int) -> Event:
+        """#91: adoption found nothing, so look for a PR that references the issue and merged while nobody was watching.
+        A MERGED match is the job's `merged` event (sha empty: the issue listing carries none); otherwise the list as read."""
+        merged = [p for p in github.list_prs_for_issue(run, rnd.repo, rnd.issue) if str(p.get("state", "")).upper() == "MERGED"]
+        if not merged: return Event(ev.kind, ev.now, {**ev.data, "job": n})
+        p = min(merged, key=lambda p: (not arbiter.closes_or_refs(p.get("body") or "", rnd.issue, rnd.repo), int(p["number"])))
+        return Event("merged", ev.now, {"job": n, "pr": int(p["number"]), "sha": str((p.get("mergeCommit") or {}).get("oid") or "")})
+
+    def request_review(self, w: wave_mod.Wave, n: int, run):
+        """#88: request the job's auditor on GitHub once per (job, head) of an open, non-draft PR, remembered in memory.
+        A 422 is final for that head: one durable notify (`ref: fm-wave-<name>-job<n>-review-refused-<head12>`).
+        Any other failure is logged and the request is tried again on the next poll."""
+        j = w.jobs[n - 1]
+        pr, login = j.round.get("pr") or {}, j.person("auditor").get("login", "")
+        head = str(pr.get("head") or "")
+        if j.terminal or not pr.get("number") or not head or not login or pr.get("draft") or str(pr.get("state", "OPEN")).upper() != "OPEN": return
+        key = (w.thread, n, head)
+        if key in self.reviews_requested: return
+        try: github.request_reviewers(run, f"{j.rnd().repo}#{pr['number']}", [login])
+        except github.ReviewRequestRefused as e:
+            ref = f"fm-wave-{w.name}-job{n}-review-refused-{head[:12]}"
+            text = f"job {n} (#{j.issue}): GitHub refused the review request for {login} on PR #{pr['number']} at {head[:12]}: {str(e)[:200]}"
+            w.pending = w.pending + [Action("notify_owner", ref, {"thread": w.thread, "text": text}).to_dict()]
+            self.save_wave(w)
+            self.drain_wave(w)
+        except Exception as e:  # noqa: BLE001 - not remembered, so the next poll requests again
+            log.warning("review request for wave %s job %d failed: %s", w.thread, n, e)
+            return
+        self.reviews_requested.add(key)
 
     def count_gh_failure(self, w: wave_mod.Wave, error: Exception | None):
         """#85: consecutive failing passes per wave; at the third, one durable notify (`ref: fm-wave-<name>-gh-failing`)."""
@@ -387,12 +428,15 @@ class Driver:
     def poll_rounds(self):
         """#46 slice 2: one PR read per round per pass while the stage is Implement or CodeAudit -- `gh pr list`
         before adoption, then `gh pr view` plus the reviews call -- fed to the arbiter as a `pr_polled` event.
-        A failed read is logged and retried on the next pass."""
+        A failed read is logged and retried on the next pass. Each round is read at most every `github.poll_interval` (#85)."""
         run = self.gh_runner()
         if run is None: return
         for thread in self.store.rounds():
             rnd = self.load_round(thread)
             if rnd is None or rnd.stage not in arbiter.PR_STAGES or not rnd.repo or not rnd.issue: continue
+            now = self.clock()
+            if now < self.round_polled.get(thread, float("-inf")) + self.cfg.github.poll_interval: continue
+            self.round_polled[thread] = now
             try: ev = self.read_pr(rnd, run)
             except Exception as e:  # noqa: BLE001 - a GitHub read never stalls a round; the next pass reads again
                 log.warning("pr read for round %s failed: %s", thread, e)

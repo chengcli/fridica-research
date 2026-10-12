@@ -1,6 +1,7 @@
 """#85: wave PR polling honours `poll_interval`, surfaces GitHub failures, survives a daemon outage (ref fm-wave-f-assign).
 
-`poll_waves` keeps a per-job `last_poll` and reads a job's PR at most once per `cfg.github.poll_interval`.
+`poll_waves` keeps a per-job `last_poll` and reads a job's PR at most once per `cfg.github.poll_interval`;
+`poll_rounds` does the same per adopted round. The failure count is kept in memory only.
 A pass with any failed read adds 1 to the wave's failure count and a clean pass resets it; at 3 one durable
 notify (`ref: fm-wave-<name>-gh-failing`) goes on `Wave.pending`, and no more while the reads keep failing.
 `poll_waves` still runs when the daemon is Unavailable. A failed `ref:` probe is "unknown": the send is skipped.
@@ -12,8 +13,12 @@ from fridica_research.client import ControlError, Unavailable
 from fridica_research.machine import Action
 from test_issue69_wave import H, THREAD
 from test_issue69b_driver import pass_reads, setup, stored
+import test_issue46_guards as guards
+from test_issue46_pr import ISSUE, later, pr
+from test_issue46_pr import setup as round_setup
 
 GH_FAILING = "fm-wave-d-gh-failing"
+world = guards.world  # the adopted-round fixture of #46
 
 
 def test_poll_waves_honours_poll_interval(tmp_path):
@@ -73,3 +78,16 @@ def test_failed_probe_skips_the_send(tmp_path):
     a = Action("post", "fm-wave-d-x", {"thread": THREAD, "post_kind": "report", "text": "hello\nref: fm-wave-d-x"})
     assert drv.execute_round(arbiter.Round(thread=THREAD), a, thread=THREAD) is not None  # kept pending
     assert client.posts == []
+
+
+def test_poll_rounds_honours_poll_interval(world):
+    """An adopted round's PR is read at most once per `poll_interval`, as a wave job's is."""
+    server, store, drv, gh = round_setup(world, "Implement")
+    gh.prs = [pr(82, "imp", f"Closes #{ISSUE}")]
+    drv.run_once()
+    drv.clock.t += 1.0
+    drv.run_once()
+    assert gh.reads() == ["gh pr list"]  # inside poll_interval: no second read
+    later(drv)
+    drv.run_once()
+    assert gh.reads() == ["gh pr list", "gh pr view", "gh api --paginate"]

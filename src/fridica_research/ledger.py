@@ -6,9 +6,12 @@ so the floor manager's ETAs can be scored (R48) and a wave can be closed with a 
 `DDL` below is the prototype schema, copied verbatim from Cheng's comment on issue #53
 (comment id 6113435186, 2026-10-11T20:31:57Z), plus the four usage columns of the R50 amendment
 (#54: `session_usage`, `session_reset`, `weekly_usage`, `weekly_reset` on `workload`, after
-`offline`); `tests/test_issue53_ledger.py` checks the database this module creates against that
-text column by column. A ledger file written before the amendment is brought up to date on
-`connect` (`ALTER TABLE ... ADD COLUMN`), and a prototype without the columns still imports. The real prototype
+`offline`), and the three intake columns of #84 (`free_slots`, `total_slots`, `client` on
+`workload`, after `weekly_reset`; `slots` keeps its prototype meaning and is not overloaded);
+`tests/test_issue53_ledger.py` checks the database this module creates against that
+text column by column. A ledger file written before either amendment is brought up to date on
+`connect` (`ALTER TABLE ... ADD COLUMN`, appended after `recorded`), and a prototype without the
+columns still imports. The real prototype
 (`~/.local/state/fridica-research/jobs.sqlite3`) stays with the floor manager: nothing here
 reads a fixed path, and the tests run on a synthetic fixture built from the DDL.
 
@@ -27,13 +30,13 @@ from __future__ import annotations
 
 import sqlite3
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from . import eta
 
 # The prototype schema, verbatim (issue #53, comment 6113435186) plus the R50 amendment's usage
-# columns on `workload` (#54). Do not reformat: the tests compare the live database against this text.
+# columns (#54) and the intake columns (#84) on `workload`. Do not reformat: the tests compare the live database against this text.
 DDL = """
 CREATE TABLE innies(
   innie TEXT PRIMARY KEY, outie TEXT, slack TEXT, github TEXT,
@@ -58,6 +61,7 @@ CREATE TABLE workload(
   id INTEGER PRIMARY KEY, innie TEXT, asked_at TEXT, reported_at TEXT,
   machines TEXT, slots INTEGER, in_progress TEXT, queued TEXT, limits TEXT,
   offline TEXT, session_usage REAL, session_reset TEXT, weekly_usage REAL, weekly_reset TEXT,
+  free_slots INTEGER, total_slots INTEGER, client TEXT,
   source TEXT, recorded TEXT DEFAULT (datetime('now')));
 """
 
@@ -66,6 +70,7 @@ KEYS = {"innies": "innie", "jobs": "id", "lessons": "id", "waves": "wave", "work
 DEFAULTED = ("recorded",)  # columns whose default is a clock: set once, never rewritten by an import
 SCHEMA = DDL.replace("CREATE TABLE ", "CREATE TABLE IF NOT EXISTS ")  # same tables; re-opening a ledger is not an error
 USAGE_COLUMNS = (("session_usage", "REAL"), ("session_reset", "TEXT"), ("weekly_usage", "REAL"), ("weekly_reset", "TEXT"))  # R50 amendment (#54), on `workload`
+INTAKE_COLUMNS = (("free_slots", "INTEGER"), ("total_slots", "INTEGER"), ("client", "TEXT"))  # workload intake (#84), on `workload`
 
 
 def ro_uri(path: str | Path) -> str:
@@ -80,7 +85,7 @@ def connect(path: str | Path = ":memory:") -> sqlite3.Connection:
     db.row_factory = sqlite3.Row
     db.executescript(SCHEMA)
     have = columns(db, "workload")
-    for name, kind in USAGE_COLUMNS:  # a ledger created before the R50 amendment gains the usage columns in place
+    for name, kind in (*USAGE_COLUMNS, *INTAKE_COLUMNS):  # a ledger created before the R50 amendment or #84 gains their columns in place
         if name not in have: db.execute(f"ALTER TABLE workload ADD COLUMN {name} {kind}")
     return db
 
@@ -212,3 +217,52 @@ def scorecard_table(cards: dict) -> str:
         for name, c in cards[level].items(): line(level, name, c)
     line("crew", "all", cards["crew"])
     return "\n".join(out)
+
+
+# -- workload intake (#84) -------------------------------------------------------------
+FRESH_HOURS = 6.0  # R50: a report is fresh this long after it was posted, or until a usage reset it carries passes
+
+
+def ingest(db: sqlite3.Connection, report: dict, source: str) -> ImportResult:
+    """Write one parsed report (`workload.parse(...).row()`) as a `workload` row.
+
+    Idempotent on `(innie, source)`: the same post ingested again matches its earlier row and
+    changes nothing; an edited post updates that row in place. `recorded` is set once."""
+    if not report.get("innie") or not source: raise ValueError("ingest needs an innie and a source")
+    row = {**report, "source": source}
+    old = db.execute("SELECT id FROM workload WHERE innie=? AND source=? ORDER BY id LIMIT 1", (row["innie"], source)).fetchone()
+    row["id"] = old["id"] if old else (db.execute("SELECT COALESCE(MAX(id), 0) + 1 FROM workload").fetchone()[0])
+    return import_rows(db, "workload", [row])
+
+
+def fresh(row, now: datetime, hours: float = FRESH_HOURS) -> bool:
+    """Whether a `workload` row still speaks for its Innie at `now`: posted no more than `hours`
+    ago (and not in the future), and no usage reset it reports has passed since."""
+    at = _when(row["reported_at"])
+    if at is None or not at <= now <= at + timedelta(hours=hours): return False
+    return all(r is None or now < r for r in (_when(row["session_reset"]), _when(row["weekly_reset"])))
+
+
+def latest(db: sqlite3.Connection, now: datetime, hours: float = FRESH_HOURS) -> dict[str, dict]:
+    """The newest fresh report per Innie at `now`; an Innie whose newest report is stale is absent."""
+    out: dict[str, dict] = {}
+    for r in db.execute("SELECT * FROM workload WHERE innie IS NOT NULL ORDER BY reported_at, id"):
+        out[r["innie"]] = dict(r)
+    return {k: r for k, r in out.items() if fresh(r, now, hours)}
+
+
+def alternatives(db: sqlite3.Connection, now: datetime, hours: float = FRESH_HOURS, exclude=()) -> list[str]:
+    """Innies with a fresh report and a free slot that are not capped, best first (R51's "first free alternative").
+
+    Over quota (`session_usage >= eta.SESSION_QUOTA`) or capped (`weekly_usage >= eta.WEEKLY_CAP`)
+    is out. Usage that is unknown (NULL, posted `unreadable`) is not capped, but such an Innie
+    ranks after every Innie whose usage is known; so does one whose free slots are unknown.
+    Ties go to more free slots, then lower weekly usage, then name. `exclude` drops Innies
+    (the one already holding the job's other role, for example)."""
+    ranked = []
+    for name, r in latest(db, now, hours).items():
+        if name in exclude or r["free_slots"] == 0: continue
+        s, w = r["session_usage"], r["weekly_usage"]
+        if (s is not None and s >= eta.SESSION_QUOTA) or (w is not None and w >= eta.WEEKLY_CAP): continue
+        ranked.append(((s is None or w is None, r["free_slots"] is None, -(r["free_slots"] or 0), w if w is not None else 0.0, name), name))
+    return [name for _, name in sorted(ranked)]

@@ -68,24 +68,25 @@ def test_every_column_of_the_issue_ddl_is_present_in_order(db, table):
 
 WORKLOAD_BEFORE_R50 = ["id", "innie", "asked_at", "reported_at", "machines", "slots", "in_progress", "queued", "limits", "offline", "source", "recorded"]
 USAGE = ["session_usage", "session_reset", "weekly_usage", "weekly_reset"]
+INTAKE = ["free_slots", "total_slots", "client"]  # #84
 
 
 def test_a_fresh_ledger_has_the_workload_columns_in_ddl_order(db):
-    assert ledger.columns(db, "workload") == [*WORKLOAD_BEFORE_R50[:10], *USAGE, "source", "recorded"]
+    assert ledger.columns(db, "workload") == [*WORKLOAD_BEFORE_R50[:10], *USAGE, *INTAKE, "source", "recorded"]
     assert [c for c, _ in ledger.USAGE_COLUMNS] == USAGE
 
 
 def test_a_migrated_ledger_appends_the_usage_columns_after_recorded(tmp_path):
     path = tmp_path / "old.sqlite3"
     old = sqlite3.connect(str(path), isolation_level=None)
-    old.executescript(re.sub(r"offline TEXT, session_usage REAL, session_reset TEXT, weekly_usage REAL, weekly_reset TEXT,", "offline TEXT,", ledger.DDL))
+    old.executescript(re.sub(r"offline TEXT, session_usage REAL, session_reset TEXT, weekly_usage REAL, weekly_reset TEXT,\n  free_slots INTEGER, total_slots INTEGER, client TEXT,", "offline TEXT,", ledger.DDL))
     old.close()
     db = ledger.connect(path)
-    assert ledger.columns(db, "workload") == [*WORKLOAD_BEFORE_R50, *USAGE]
+    assert ledger.columns(db, "workload") == [*WORKLOAD_BEFORE_R50, *USAGE, *INTAKE]
     assert {t: ledger.columns(db, t) for t in ledger.TABLES if t != "workload"} == {t: ddl_columns(t) for t in ledger.TABLES if t != "workload"}
     db.close()
     again = ledger.connect(path)  # a second connect migrates nothing more
-    assert ledger.columns(again, "workload") == [*WORKLOAD_BEFORE_R50, *USAGE]
+    assert ledger.columns(again, "workload") == [*WORKLOAD_BEFORE_R50, *USAGE, *INTAKE]
     again.close()
 
 

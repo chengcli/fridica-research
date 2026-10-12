@@ -24,7 +24,10 @@ from __future__ import annotations
 
 import sqlite3
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from pathlib import Path
+
+from . import eta
 
 # The prototype schema, verbatim (issue #53, comment 6113435186). Do not reformat: the tests
 # compare the live database against this text.
@@ -69,6 +72,14 @@ def connect(path: str | Path = ":memory:") -> sqlite3.Connection:
     return db
 
 
+def open_existing(path: str | Path) -> sqlite3.Connection:
+    """Open a ledger that must already exist, read-only: a missing path is an error, never an empty new ledger."""
+    if not Path(path).is_file(): raise FileNotFoundError(f"no ledger at {path}")
+    db = sqlite3.connect(f"file:{Path(path)}?mode=ro", uri=True)
+    db.row_factory = sqlite3.Row
+    return db
+
+
 def columns(db: sqlite3.Connection, table: str) -> list[str]:
     return [r[1] for r in db.execute(f"PRAGMA table_info({table})")]
 
@@ -93,11 +104,13 @@ def import_rows(db: sqlite3.Connection, table: str, rows) -> ImportResult:
     """Carry `rows` (dicts) into `table`, matching on its primary key. Idempotent: see the module docstring."""
     if table not in TABLES: raise ValueError(f"unknown ledger table {table!r}")
     key, known = KEYS[table], columns(db, table)
+    rows = list(rows)
+    for raw in rows:  # #64 note 1: the whole batch is validated before its first write, so a bad row leaves nothing half-imported
+        if unknown := set(raw) - set(known): raise ValueError(f"{table}: unknown column(s) {sorted(unknown)}")
     result = ImportResult()
     with db:
         for raw in rows:
             row = {c: raw[c] for c in known if c in raw}
-            if unknown := set(raw) - set(known): raise ValueError(f"{table}: unknown column(s) {sorted(unknown)}")
             if row.get(key) is None: result += ImportResult(skipped=1); continue
             old = db.execute(f"SELECT * FROM {table} WHERE {key}=?", (row[key],)).fetchone()
             if old is None:
@@ -137,3 +150,51 @@ def import_sqlite(db: sqlite3.Connection, source: str | Path, tables=TABLES) -> 
 def dump(db: sqlite3.Connection, tables=TABLES) -> dict[str, list[dict]]:
     """Every row of every table, ordered by primary key: the comparison an idempotency check needs."""
     return {t: [dict(r) for r in db.execute(f"SELECT * FROM {t} ORDER BY {KEYS[t]}")] for t in tables}
+
+
+# -- scorecards (#53 PR 2a) -----------------------------------------------------------
+@dataclass(frozen=True)
+class Scorecard:
+    """One group's record: jobs, delivered, coverage (delivered over jobs), and the R48 score of its scored jobs."""
+    jobs: int = 0
+    delivered: int = 0
+    coverage: float = 0.0
+    mae: float = 0.0
+    bias: float = 0.0
+    late: int = 0
+    early: int = 0
+
+
+def _when(text) -> datetime | None:
+    """A ledger time (ISO text) as an aware datetime, UTC when it carries no offset; None when absent or unreadable."""
+    try: t = datetime.fromisoformat(str(text).strip().replace("Z", "+00:00")) if text else None
+    except ValueError: return None
+    return t.replace(tzinfo=timezone.utc) if t is not None and t.tzinfo is None else t
+
+
+def card(rows, tolerance_hours: float = 0.0) -> Scorecard:
+    """`eta.score` over the rows that have both `eta` (the first committed ETA) and `delivered_at`;
+    the error is recomputed from those two, never read from `error_hours`."""
+    rows = list(rows)
+    delivered = [r for r in rows if r["delivered_at"]]
+    scored = [eta.Scored(str(r["ref"] or r["id"]), e, d) for r in delivered if (e := _when(r["eta"])) and (d := _when(r["delivered_at"]))]
+    s = eta.score(scored, tolerance_hours)
+    return Scorecard(jobs=len(rows), delivered=len(delivered), coverage=len(delivered) / len(rows) if rows else 0.0,
+                     mae=s.mae_hours, bias=s.bias_hours, late=s.late, early=s.early)
+
+
+def scorecards(db: sqlite3.Connection, tolerance_hours: float = 0.0) -> dict:
+    """Scorecards per Innie, per role and for the whole crew: `{"innie": {name: Scorecard}, "role": {...}, "crew": Scorecard}`."""
+    rows = [dict(r) for r in db.execute("SELECT id, ref, role, innie, eta, delivered_at FROM jobs ORDER BY id")]
+    def by(col): return {k: card([r for r in rows if (r[col] or "") == k], tolerance_hours) for k in sorted({r[col] or "" for r in rows})}
+    return {"innie": by("innie"), "role": by("role"), "crew": card(rows, tolerance_hours)}
+
+
+def scorecard_table(cards: dict) -> str:
+    """The scorecards as one Markdown table: what `score` prints and what `score --board` writes to the project readme."""
+    out = ["| Level | Name | Jobs | Delivered | Coverage | MAE (h) | Bias (h) | Late | Early |", "|---|---|---|---|---|---|---|---|---|"]
+    def line(level, name, c): out.append(f"| {level} | {name or '(none)'} | {c.jobs} | {c.delivered} | {c.coverage:.0%} | {c.mae:.2f} | {c.bias:+.2f} | {c.late} | {c.early} |")
+    for level in ("innie", "role"):
+        for name, c in cards[level].items(): line(level, name, c)
+    line("crew", "all", cards["crew"])
+    return "\n".join(out)

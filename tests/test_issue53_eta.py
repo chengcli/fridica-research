@@ -112,8 +112,8 @@ def test_a_fresh_workload_report_outranks_the_history_buffer():
     e = estimate(NOW, "alfa", buffer=BUSY, workload=free, trial=TrialRun(hours=2.0), input_at=NOW - timedelta(hours=5))
     assert e.basis == "workload" and e.work_basis == "trial"
     assert e.input_at == NOW  # not the five-hours-ago arrival: a free Innie starts now
-    assert "queue" not in e.buffer and e.buffer_hours == pytest.approx(0.5)  # sign-off lag only
-    assert e.eta == NOW + timedelta(hours=2.5)
+    assert "queue" not in e.buffer and e.buffer_hours == pytest.approx(1.25)  # sign-off lag, plus the history offline buffer (#64 note 2)
+    assert e.buffer["offline"] == pytest.approx(0.75) and e.eta == NOW + timedelta(hours=3.25)
 
 
 def test_queue_buffer_only_for_jobs_actually_ahead_in_the_slot():
@@ -121,7 +121,8 @@ def test_queue_buffer_only_for_jobs_actually_ahead_in_the_slot():
                             queued=(Slot(ref="#45", remaining_hours=2.0), Slot(ref="#46", remaining_hours=4.0, ahead=False)))
     e = estimate(NOW, "alfa", buffer=BUSY, workload=report, trial=TrialRun(hours=1.0), will_prompt_signoff=True)
     assert e.buffer["queue"] == pytest.approx(2.75)  # #44 and #45; #46 runs beside us
-    assert e.buffer_hours == pytest.approx(2.75) and e.eta == NOW + timedelta(hours=3.75)
+    assert e.buffer["offline"] == pytest.approx(0.75)  # the report names no offline_until: the history buffer stays (#64 note 2)
+    assert e.buffer_hours == pytest.approx(3.5) and e.eta == NOW + timedelta(hours=4.5)
 
 
 def test_a_stale_report_is_not_evidence_and_the_history_buffer_comes_back():

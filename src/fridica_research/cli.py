@@ -1,4 +1,4 @@
-"""`fridica-research start | adopt | list | stop | resume | note | pr | serve | replay` (argparse, stdlib only)."""
+"""`fridica-research start | adopt | list | stop | resume | note | pr | serve | replay | score` (argparse, stdlib only)."""
 from __future__ import annotations
 
 import argparse
@@ -8,8 +8,8 @@ import sys
 import time
 from dataclasses import asdict
 
-from . import arbiter, config, contracts, provenance
-from .board import Board, role_totals
+from . import arbiter, config, contracts, ledger, provenance
+from .board import Board, Projects, role_totals
 from .client import Client, read_capability
 from .driver import Driver, claude_runner
 from .github import GitHub, MilestoneMissing, PrHygieneError
@@ -170,7 +170,30 @@ def parser() -> argparse.ArgumentParser:
     r.add_argument("path", help="a corpus directory or a parent such as tests/bootstrap")
     r.add_argument("--strict", action="store_true", help="textual differences (D1) fail too")
     r.add_argument("--accept-added-fields", action="store_true", help="fields the fold adds to actions or state (D3) pass")
+    sc = sub.add_parser("score", help="print the job ledger's scorecards per Innie, role and crew (#53)")
+    sc.add_argument("ledger", help="path of an existing ledger; a missing path is an error, never a new ledger")
+    sc.add_argument("--tolerance", type=float, default=0.0, metavar="H", help="hours around the ETA that count as on time")
+    sc.add_argument("--board", action="store_true", help="also write the table to the Project v2 readme")
     return p
+
+
+def cmd_score(args) -> int:
+    """#53: the ledger's scorecards per Innie, role and crew; `--board` writes them to the Project v2 readme."""
+    try: db = ledger.open_existing(args.ledger)
+    except FileNotFoundError as e:
+        print(str(e), file=sys.stderr)
+        return 1
+    try: table = ledger.scorecard_table(ledger.scorecards(db, args.tolerance))
+    finally: db.close()
+    print(table)
+    if args.board:
+        cfg = config.load(args.config)
+        if not (cfg.board.enabled and cfg.board.owner and cfg.board.number):
+            print("--board needs [board] enabled with owner and number", file=sys.stderr)
+            return 1
+        Projects(cfg).set_readme(table)
+        print(f"wrote the scorecards to the readme of project {cfg.board.owner}/{cfg.board.number}")
+    return 0
 
 
 def cmd_replay(args) -> int:
@@ -182,6 +205,7 @@ def cmd_replay(args) -> int:
 def main(argv: list[str] | None = None) -> int:
     args = parser().parse_args(argv)
     if args.cmd == "replay": return cmd_replay(args)
+    if args.cmd == "score": return cmd_score(args)
     if args.cmd == "roles":
         print("driver and arbitrator (policy only; never delegated)")
         for role in ROLES:

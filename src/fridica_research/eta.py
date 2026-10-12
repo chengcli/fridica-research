@@ -140,6 +140,13 @@ def work_from_history(history, nature: str = "", size: str = "") -> float | None
     return None
 
 
+def offline_hours(report: WorkloadReport | None, buf: InnieBuffer, start: datetime) -> float:
+    """#64 note 2: a report that names `offline_until` settles the offline buffer (the hours left, zero
+    when it is at or before the start); a report that names none keeps the Innie's history buffer."""
+    if report is None or report.offline_until is None: return buf.offline_hours
+    return max(0.0, _hours(report.offline_until - start))
+
+
 def estimate(now: datetime, innie: str, *, buffer: InnieBuffer | None = None, workload: WorkloadReport | None = None,
              trial: TrialRun | None = None, history=(), nature: str = "", size: str = "",
              reasoning_hours: float | None = None, input_at: datetime | None = None,
@@ -174,7 +181,7 @@ def estimate(now: datetime, innie: str, *, buffer: InnieBuffer | None = None, wo
         "queue": report.queue_hours if report is not None else buf.queue_hours,
         "rate_limit": report.rate_limited_hours if report is not None else buf.rate_limit_hours,
         "signoff": 0.0 if will_prompt_signoff else buf.signoff_hours,
-        "offline": max(0.0, _hours(report.offline_until - start)) if (report is not None and report.offline_until is not None and report.offline_until > start) else (0.0 if report is not None else buf.offline_hours),
+        "offline": offline_hours(report, buf, start),
     }
     parts = {k: v for k, v in parts.items() if v}
     total = sum(parts.values())

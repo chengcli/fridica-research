@@ -120,6 +120,10 @@ class Projects:
         if self._project is None: self._project = self.discover(self.b.owner, self.b.number)
         return self._project
 
+    def set_readme(self, text: str):
+        """Replace the Project v2 readme (#53 `score --board`): one `updateProjectV2` mutation, nothing else."""
+        self.graphql("mutation($project:ID!,$readme:String!){updateProjectV2(input:{projectId:$project,readme:$readme}){projectV2{id}}}", project=self.project().id, readme=text)
+
     def ensure_fields(self):
         """Create the fields of FIELDS that the project lacks (once); refresh the cache afterwards."""
         missing = [n for n in FIELDS if n not in self.project().fields]

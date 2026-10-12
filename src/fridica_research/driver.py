@@ -342,7 +342,7 @@ class Driver:
     def poll_waves(self):
         """One `read_pr` per open job at most every `github.poll_interval` (#85); a merged or dropped job and a closed
         wave are never polled (#93). A PR read as MERGED is fed as a `merged` event; with no PR adopted, a MERGED PR
-        that references the issue is too (#91). A pass with any failed read counts against the wave and a clean one
+        that closes or refers to the issue and merged after the wave opened is too (#91). A pass with any failed read counts against the wave and a clean one
         resets the count; the third failing pass in a row puts one notify on `Wave.pending`. Each new head of an
         open PR gets the auditor's review requested (#88)."""
         run = self.gh_runner()
@@ -367,7 +367,7 @@ class Driver:
                 if view.get("state") == "MERGED":
                     ev = Event("merged", ev.now, {"job": n, "pr": rnd.pr["number"], "sha": str((view.get("mergeCommit") or {}).get("oid") or "")})
                 elif "prs" in ev.data and arbiter.pick_pr(rnd, ev.get("prs") or [], self.cfg) is None:
-                    try: ev = self.unwatched_merge(rnd, run, ev, n)
+                    try: ev = self.unwatched_merge(rnd, run, ev, n, w.opened_at)
                     except Exception as e:  # noqa: BLE001 - as a failed read: counted, and read again on the next pass
                         log.warning("issue PR lookup for wave %s job %d failed: %s", thread, n, e)
                         error = error or e
@@ -377,12 +377,18 @@ class Driver:
                 self.request_review(w, n, run)
             if reads: self.count_gh_failure(w, error)
 
-    def unwatched_merge(self, rnd: arbiter.Round, run, ev: Event, n: int) -> Event:
-        """#91: adoption found nothing, so look for a PR that references the issue and merged while nobody was watching.
-        A MERGED match is the job's `merged` event (sha empty: the issue listing carries none); otherwise the list as read."""
-        merged = [p for p in github.list_prs_for_issue(run, rnd.repo, rnd.issue) if str(p.get("state", "")).upper() == "MERGED"]
-        if not merged: return Event(ev.kind, ev.now, {**ev.data, "job": n})
-        p = min(merged, key=lambda p: (not arbiter.closes_or_refs(p.get("body") or "", rnd.issue, rnd.repo), int(p["number"])))
+    def unwatched_merge(self, rnd: arbiter.Round, run, ev: Event, n: int, opened_at: float | None) -> Event:
+        """#91: adoption found nothing, so look for the job's PR that merged while nobody was watching: MERGED at or after
+        the wave opened, with a Closes/Fixes/Resolves/Refs line for the issue; the lowest number wins. That PR is the job's
+        `merged` event (sha empty: the issue listing carries none); otherwise the list as read. Without `opened_at` or a
+        PR's `mergedAt` nothing can be bounded in time, so nothing matches."""
+        def merged_since(p: dict) -> bool:
+            if str(p.get("state", "")).upper() != "MERGED" or opened_at is None or not p.get("mergedAt"): return False
+            try: return github.parse_iso(str(p["mergedAt"])) >= float(opened_at)
+            except ValueError: return False
+        ok = [p for p in github.list_prs_for_issue(run, rnd.repo, rnd.issue) if merged_since(p) and arbiter.closes_or_refs(p.get("body") or "", rnd.issue, rnd.repo)]
+        if not ok: return Event(ev.kind, ev.now, {**ev.data, "job": n})
+        p = min(ok, key=lambda p: int(p["number"]))
         return Event("merged", ev.now, {"job": n, "pr": int(p["number"]), "sha": str((p.get("mergeCommit") or {}).get("oid") or "")})
 
     def request_review(self, w: wave_mod.Wave, n: int, run):
@@ -426,9 +432,9 @@ class Driver:
         return self.board.api.run if self.board is not None and self.cfg.board.enabled and getattr(self.board, "api", None) is not None else None
 
     def poll_rounds(self):
-        """#46 slice 2: one PR read per round per pass while the stage is Implement or CodeAudit -- `gh pr list`
+        """#46 slice 2: one PR read per round per `github.poll_interval` while the stage is Implement or CodeAudit -- `gh pr list`
         before adoption, then `gh pr view` plus the reviews call -- fed to the arbiter as a `pr_polled` event.
-        A failed read is logged and retried on the next pass. Each round is read at most every `github.poll_interval` (#85)."""
+        A failed read is logged and retried on the next due poll (#85)."""
         run = self.gh_runner()
         if run is None: return
         for thread in self.store.rounds():

@@ -131,3 +131,34 @@ def test_a_closed_wave_is_not_polled(tmp_path):
         drv.run_once()
         clock.t += H
     assert gh.calls == []
+
+
+def issue_pr(number: int, body: str, merged_at: str | None, title: str = "x") -> dict:
+    return {"number": number, "title": title, "body": body, "state": "MERGED", "isDraft": False, "author": {"login": "other"}, "headRefOid": NEW, "mergedAt": merged_at}
+
+
+def test_a_pr_merged_before_the_wave_opened_is_ignored(tmp_path):
+    store, client, gh, clock, drv = world(tmp_path)
+    gh.prs.pop(73)
+    gh.issue_prs = [issue_pr(40, "Refs #61", "2020-01-01T00:00:00Z"), issue_pr(41, "Closes #61", None)]  # merged in 2020; mergedAt missing
+    drv.run_once()
+    j3 = stored(store).jobs[2]
+    assert not j3.merged and j3.rnd().pr.get("number") is None and gh.issue_lookups() == 1
+
+
+def test_a_pr_that_only_mentions_the_issue_is_ignored(tmp_path):
+    store, client, gh, clock, drv = world(tmp_path)
+    gh.prs.pop(73)
+    gh.issue_prs = [issue_pr(76, "Follow-up to #61, see there.", "2026-10-12T15:00:00Z", title="see #61")]
+    drv.run_once()
+    assert not stored(store).jobs[2].merged
+
+
+def test_the_lowest_qualifying_pr_number_wins(tmp_path):
+    store, client, gh, clock, drv = world(tmp_path)
+    gh.prs.pop(73)
+    gh.issue_prs = [issue_pr(79, "Fixes #61", "2026-10-12T16:00:00Z"), issue_pr(77, "Refs #61", "2026-10-12T15:00:00Z"),
+                    issue_pr(60, "Refs #61", "2020-01-01T00:00:00Z"), issue_pr(70, "see #61", "2026-10-12T15:00:00Z")]
+    drv.run_once()
+    j3 = stored(store).jobs[2]
+    assert j3.merged and j3.rnd().pr["number"] == 77  # 60 merged before the wave, 70 has no Closes/Refs line

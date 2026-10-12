@@ -49,6 +49,11 @@ def refs(client) -> list[str]: return [contracts.ref_of(t) for _, t in client.po
 def wakes(client) -> list[str]: return [t.rsplit("ref: ", 1)[1] for _, _, t in client.instructs]
 
 
+
+def rung(n: int, eta: float, name: str) -> str:
+    """A ladder rung id since #108: `<ref>/<holder>@<eta>/<rung>`."""
+    return f"fm-wave-d-job{n}/{PEOPLE[f'imp{n}']}@{int(eta)}/{name}"
+
 def test_one_checkin_per_job_at_the_eta(tmp_path):
     store, client, gh, clock, drv = ladder_world(tmp_path, prs=False)
     drv.run_once()
@@ -57,9 +62,9 @@ def test_one_checkin_per_job_at_the_eta(tmp_path):
     for _ in range(3):
         drv.run_once()
         clock.t += MIN
-    assert sorted(r for r in refs(client) if r and r.endswith("/checkin")) == [f"fm-wave-d-job{n}/checkin" for n in (1, 2, 3)]
+    assert sorted(r for r in refs(client) if r and r.endswith("/checkin")) == [rung(n, T0 + 2 * H, "checkin") for n in (1, 2, 3)]
     m = meta(store, 1)
-    assert m["key"] == ["pr", PEOPLE["imp1"], T0 + 2 * H] and m["checkin_at"] == T0 + 2 * H and "fm-wave-d-job1/checkin" in m["done"]
+    assert m["key"] == ["pr", PEOPLE["imp1"], T0 + 2 * H] and m["checkin_at"] == T0 + 2 * H and rung(1, T0 + 2 * H, "checkin") in m["done"]
 
 
 def test_silence_past_eta_plus_w_wakes_the_deputy_once_and_a_reply_counts(tmp_path):
@@ -74,7 +79,7 @@ def test_silence_past_eta_plus_w_wakes_the_deputy_once_and_a_reply_counts(tmp_pa
     for _ in range(2):
         drv.run_once()
         clock.t += MIN
-    assert sorted(wakes(client)) == ["fm-wave-d-job2/escalate", "fm-wave-d-job3/escalate"]  # job 1 replied after its check-in
+    assert sorted(wakes(client)) == [rung(2, T0 + 2 * H, "escalate"), rung(3, T0 + 2 * H, "escalate")]  # job 1 replied after its check-in
 
 
 def test_tick_runs_after_poll_waves(tmp_path):
@@ -96,7 +101,7 @@ def test_no_tick_when_the_daemon_is_unavailable(tmp_path):
     assert client.posts == [] and client.instructs == [] and meta(store, 1)["checkin_at"] is None
     client.down = False
     drv.run_once()
-    assert "fm-wave-d-job1/checkin" in refs(client)
+    assert rung(1, T0 + 2 * H, "checkin") in refs(client)
 
 
 def test_a_new_eta_resets_done_and_checkin(tmp_path):

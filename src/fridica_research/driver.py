@@ -432,7 +432,7 @@ class Driver:
                 for a in actions:
                     if a.id in m["done"] or self.execute_ladder(thread, a): continue
                     m["done"] = m["done"] + [a.id]
-                    if a.id == f"{v.ref}/checkin": m["checkin_at"] = now
+                    if a.id == f"{ladder.key(v)}/checkin": m["checkin_at"] = now  # #108 ids carry holder and ETA
                 self.save_ladder(thread, n, m)
 
     @staticmethod

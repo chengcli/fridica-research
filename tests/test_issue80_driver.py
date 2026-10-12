@@ -43,7 +43,7 @@ def test_a_wake_is_one_instruct_with_the_ref_client_id(tmp_path):
         drv.run_once()
         clock.t += MIN
     ids = sorted(cid for _, cid, _ in client.instructs)
-    assert ids == sorted(deputy.client_id(f"fm-wave-d-job{n}/escalate") for n in (1, 2, 3))
+    assert ids == sorted(deputy.client_id(f"fm-wave-d-job{n}/{PEOPLE[f'imp{n}']}@{int(T0 + 2 * H)}/escalate") for n in (1, 2, 3))
     assert all(th == THREAD for th, _, _ in client.instructs)
 
 

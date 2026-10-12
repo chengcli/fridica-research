@@ -48,23 +48,26 @@ class Store:
         """One holder per state file (#93): an advisory `flock` on `<state>.lock`, whose contents are the holder's pid.
 
         A lock already held raises `LockHeld` naming that lock file and that pid, never a bare "busy"; an
-        in-memory store locks nothing. Releasing clears the pid, so a stale file never names a dead holder."""
+        in-memory store locks nothing. Only the holder writes the file and only the holder clears it on release,
+        so a stale file never names a dead holder and a refused caller never erases a live one's pid."""
         p = self.lock_path
         if p is None:
             yield None
             return
         p.parent.mkdir(parents=True, exist_ok=True)
-        fh = open(p, "a+")
+        fh, taken = open(p, "a+"), False
         try:
             try: fcntl.flock(fh.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
             except OSError as e:
                 fh.seek(0)
                 raise LockHeld(f"{p} is held by pid {fh.read().strip() or 'unknown'}; one fridica-research serve at a time on this state file") from e
+            taken = True
             fh.seek(0); fh.truncate(); fh.write(f"{os.getpid()}\n"); fh.flush()
             yield fh
         finally:
-            with contextlib.suppress(OSError):
-                fh.seek(0); fh.truncate(); fh.flush()
+            if taken:  # a refused caller holds no flock: truncating here would wipe the running holder's pid
+                with contextlib.suppress(OSError):
+                    fh.seek(0); fh.truncate(); fh.flush()
             fh.close()  # closing the last descriptor releases the flock
 
     @contextlib.contextmanager

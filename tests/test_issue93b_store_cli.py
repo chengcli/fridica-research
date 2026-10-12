@@ -79,6 +79,22 @@ def test_serve_refuses_while_another_holder_has_the_lock(tmp_path, capsys):
         holder.close()
 
 
+def test_two_refused_serves_in_a_row_both_name_the_live_holder(tmp_path, capsys):
+    """A refusal takes no flock, so it must not clear the lock file: otherwise the second refusal says 'pid unknown'
+    while the first holder is still serving (Linfeng's #107 finding: pid 769 named, file emptied, then 'unknown')."""
+    cfgp = write_config(tmp_path)
+    holder = Store(tmp_path / "s.sqlite3")
+    try:
+        with holder.lock():
+            for attempt in (1, 2):
+                assert cli.main(["--config", cfgp, "serve", "--once"]) == 1, attempt
+                err = capsys.readouterr().err
+                assert f"is held by pid {os.getpid()}" in err, f"refusal {attempt}: {err!r}"
+                assert holder.lock_path.read_text().strip() == str(os.getpid()), f"refusal {attempt} erased the holder's pid"
+    finally:
+        holder.close()
+
+
 def test_in_memory_store_locks_nothing(tmp_path):
     s = Store()
     try:
@@ -139,6 +155,22 @@ def test_transaction_is_immediate_and_rolls_back(tmp_path):
         assert s.get_meta("k") == "v"
     finally:
         s.close()
+
+
+def test_transaction_takes_the_write_lock_before_it_reads(tmp_path):
+    """Pins `BEGIN IMMEDIATE`, not a plain `BEGIN`: the writer must hold the write lock from the start, or a
+    second writer slips between the CLI's read and its write and the edit is lost."""
+    path = tmp_path / "s.sqlite3"
+    a, b = Store(path), Store(path)
+    try:
+        b.db.execute("PRAGMA busy_timeout=0")  # a deferred BEGIN would succeed here instead of raising
+        with a.transaction():
+            with pytest.raises(sqlite3.OperationalError, match="locked"):
+                b.db.execute("BEGIN IMMEDIATE")
+        b.db.execute("BEGIN IMMEDIATE")  # the commit released it
+        b.db.execute("ROLLBACK")
+    finally:
+        a.close(); b.close()
 
 
 def test_every_wave_cli_write_runs_in_a_transaction(tmp_path, monkeypatch, capsys):

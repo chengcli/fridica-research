@@ -17,7 +17,7 @@ import time
 from datetime import datetime, timezone
 from typing import Callable
 
-from . import arbiter, briefs, contracts, deputy, eta as eta_mod, github, ladder, ledger, machine, provenance, wave as wave_mod
+from . import arbiter, briefs, contracts, deputy, github, ladder, ledger, machine, provenance, wave as wave_mod
 from .client import Client, ControlError, Unavailable
 from .config import Config
 from .machine import Action, Event, State
@@ -323,10 +323,10 @@ class Driver:
     def wave_event(self, w: wave_mod.Wave, ev: Event) -> wave_mod.Wave:
         """One event through the wave: saved before anything is sent, then the pending posts and the other actions."""
         w, actions = wave_mod.observe(w, ev, self.cfg)
-        if self.ledger_db() is not None:  # #94: rows before the save, so the close post goes out with its score line
-            self.sync_ledger(w)
+        if getattr(self.cfg, "ledger", ""):  # #94: rows before the save, so the close post goes out with its score line
+            self.ledger_soft(w, "rows", lambda: self.sync_ledger(w))
             for a in actions:
-                if a.kind == "wave_close": self.close_ledger(w, a)
+                if a.kind == "wave_close": self.ledger_soft(w, "close", lambda a=a: self.close_ledger(w, a))
         self.save_wave(w)
         self.drain_wave(w)
         for a in actions:
@@ -400,6 +400,18 @@ class Driver:
         if self._ledger is None: self._ledger = ledger.connect(path)
         return self._ledger
 
+    def ledger_soft(self, w: wave_mod.Wave, what: str, write) -> bool:
+        """One ledger step that never stops the driver: an error (a locked database, say) is logged and kept as a wave
+        finding, never posted; the caller saves the wave either way, and the next pass writes what this one could not."""
+        try:
+            write()
+            return True
+        except Exception as e:  # noqa: BLE001 - the ledger is a record, never a reason to stall a wave or stop serve
+            log.warning("ledger %s for wave %s failed: %s", what, w.thread, e)
+            text = f"ledger {what} failed: {str(e)[:200]}"
+            if text not in w.findings: w.findings = w.findings + [text]
+            return False
+
     def ledger_register(self):
         """The register for the ledger's Innie names and the workload intake; None when unset or unreadable (logged)."""
         try: return wave_mod.load_register(self.cfg)
@@ -422,37 +434,48 @@ class Driver:
         for n, j in enumerate(w.jobs, 1):
             key = f"ledger:{wave_mod.job_thread(w.thread, n)}"
             m = json.loads(self.store.get_meta(key) or "{}")
-            before, ref = json.dumps(m, sort_keys=True), f"fm-wave-{w.name}-job{n}"
+            before = json.dumps(m, sort_keys=True)
             m.setdefault("holder", {})
             m.setdefault("delivered", {})
-            pr = j.round.get("pr") or {}
-            rv = pr.get("review") or {}
-            for role, who, name, kind in LEDGER_ROLES:
-                holder = j.person(who).get("slack", "")
-                if role not in m["holder"]:
-                    first = j.first_eta(name)
-                    est = (float(first) - float(j.input_at)) / 3600 if first is not None and j.input_at is not None else None
-                    ledger.open_job(db, source=w.thread, ref=ref, role=role, innie=innie(holder), input_at=self.utc_iso(j.input_at), eta=self.utc_iso(first), est_hours=est)
-                    m["holder"][role] = holder
-                elif holder != m["holder"][role]:
-                    ledger.reschedule(db, source=w.thread, ref=ref, role=role, to_innie=innie(holder), eta=self.utc_iso(getattr(j, name)), at=self.utc_iso(now))
-                    m["holder"][role] = holder
-                at = j.delivered.get(kind)
-                if at is None and role == "code_audit" and rv.get("state") == "CHANGES_REQUESTED" and rv.get("commit") and rv.get("commit") == pr.get("head"): at = now
-                if at is not None and role not in m["delivered"]:
-                    ledger.deliver(db, source=w.thread, ref=ref, role=role, delivered_at=self.utc_iso(at))
-                    m["delivered"][role] = self.utc_iso(at)
-            if json.dumps(m, sort_keys=True) != before: self.store.set_meta(key, json.dumps(m, sort_keys=True))
+            try: self.sync_job(db, innie, w, n, j, m, now)
+            finally:  # what did reach the ledger is remembered even when a later write of the job failed
+                if json.dumps(m, sort_keys=True) != before: self.store.set_meta(key, json.dumps(m, sort_keys=True))
+
+    def sync_job(self, db, innie, w: wave_mod.Wave, n: int, j: wave_mod.Job, m: dict, now: float):
+        """`sync_ledger` for one job; `m` is updated after each write that succeeded."""
+        ref, pr = f"fm-wave-{w.name}-job{n}", j.round.get("pr") or {}
+        rv = pr.get("review") or {}
+        for role, who, name, kind in LEDGER_ROLES:
+            holder = j.person(who).get("slack", "")
+            if role not in m["holder"]:
+                first = j.first_eta(name)
+                est = (float(first) - float(j.input_at)) / 3600 if first is not None and j.input_at is not None else None
+                ledger.open_job(db, source=w.thread, ref=ref, role=role, innie=innie(holder), input_at=self.utc_iso(j.input_at), eta=self.utc_iso(first), est_hours=est)
+                m["holder"][role] = holder
+            elif holder != m["holder"][role]:
+                ledger.reschedule(db, source=w.thread, ref=ref, role=role, to_innie=innie(holder), eta=self.utc_iso(getattr(j, name)), at=self.utc_iso(now))
+                m["holder"][role] = holder
+            at = j.delivered.get(kind)
+            if at is None and role == "code_audit" and rv.get("state") == "CHANGES_REQUESTED" and rv.get("commit") and rv.get("commit") == pr.get("head"): at = now
+            if at is not None and role not in m["delivered"]:
+                ledger.deliver(db, source=w.thread, ref=ref, role=role, delivered_at=self.utc_iso(at))
+                m["delivered"][role] = self.utc_iso(at)
 
     def close_ledger(self, w: wave_mod.Wave, a: Action):
-        """`wave_close`: the `waves` row through `write_wave`, and `close_text_score` as a line of the pending close post."""
+        """`wave_close`: the `waves` row through `write_wave`, and its score as a line of the pending close post.
+
+        The score is computed once, as `ledger.card` over the wave's original-role rows (`(resched)` rows are left out),
+        so it counts deliveries as the ledger does: `code_audit` at the first APPROVED or CHANGES_REQUESTED on the head.
+        The row and the line carry the same numbers; the fold's own `eta.Score` (review delivered at approval, or at the
+        merge when the auditor only requested changes) is not used."""
         db, merged = self.ledger_db(), a.get("jobs") or []
+        card = ledger.card(db.execute("SELECT * FROM jobs WHERE source=? AND role NOT LIKE '% (resched)' ORDER BY id", (w.thread,)).fetchall())
         last = max(merged, key=lambda x: x.get("merged_at") or 0.0) if merged else {}
         crew = sorted({j.person(r).get("slack", "") for j in w.jobs for r in ("implementer", "auditor")} - {""})
         ledger.write_wave(db, wave=w.name, source=w.thread, opened=self.utc_iso(w.opened_at), closed=self.utc_iso(w.closed_at), crew=", ".join(crew),
                           prs=", ".join(f"#{x['pr']}" for x in merged if x.get("pr")), main_before="", main_after=str(last.get("sha") or ""), validation="",
-                          score=eta_mod.Score(**(a.get("score") or {})))
-        line, ref = ledger.close_text_score(db, w.thread), wave_mod.close_ref(w)
+                          score=card)
+        line, ref = f"n={card.delivered}, MAE {card.mae:.2f}h, bias {card.bias:+.2f}h, late {card.late}, early {card.early}", wave_mod.close_ref(w)
         for p in w.pending:
             if p.get("id") != ref or line in p.get("text", ""): continue
             lines = p["text"].split("\n")
@@ -460,22 +483,23 @@ class Driver:
 
     def intake_workload(self, w: wave_mod.Wave, ev: Event):
         """#84: a crew post in a wave thread through `ledger.ingest_posts`; its findings are wave findings, never posts."""
-        db = self.ledger_db()
-        if db is None or ev.kind != "crew_post" or ev.get("sender") == self.cfg.owner: return
+        if not getattr(self.cfg, "ledger", "") or ev.kind != "crew_post" or ev.get("sender") == self.cfg.owner: return
         post = {"sender": ev.get("sender", ""), "text": ev.get("text", ""), "ts": ev.get("ts", "")}
-        _, findings = ledger.ingest_posts(db, [post], self.ledger_register(), datetime.fromtimestamp(self.clock(), timezone.utc), w.thread)
-        new = [f"workload {f['source']} from {f['sender'] or '(none)'} not ingested: {f['reason']}" for f in findings]
-        new = [f for f in new if f not in w.findings]
-        if new:
-            w.findings = w.findings + new
-            self.save_wave(w)
+        before, found = list(w.findings), []
+        def ingest():
+            _, findings = ledger.ingest_posts(self.ledger_db(), [post], self.ledger_register(), datetime.fromtimestamp(self.clock(), timezone.utc), w.thread)
+            found.extend(f"workload {f['source']} from {f['sender'] or '(none)'} not ingested: {f['reason']}" for f in findings)
+        self.ledger_soft(w, "workload", ingest)
+        w.findings = w.findings + [f for f in dict.fromkeys(found) if f not in w.findings]
+        if w.findings != before: self.save_wave(w)
 
     def ledger_waves(self):
         """Every pass: each open wave's jobs into the ledger, so a wave opened by `wave open` has its rows before any event."""
-        if self.ledger_db() is None: return
+        if not getattr(self.cfg, "ledger", ""): return
         for thread in self.waves():
             w = self.load_wave(thread)
-            if w is not None and w.closed_at is None: self.sync_ledger(w)
+            if w is None or w.closed_at is not None: continue
+            if not self.ledger_soft(w, "rows", lambda w=w: self.sync_ledger(w)): self.save_wave(w)
 
     # -- the R51 ladder for wave jobs (#83, #80, #92, #88) ---------------------------
     def ladder_key(self, thread: str, n: int) -> str: return f"ladder:{wave_mod.job_thread(thread, n)}"

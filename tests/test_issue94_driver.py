@@ -50,7 +50,8 @@ def _reschedule(db, *, source, ref, role, to_innie, eta, at):
 def _write_wave(db, *, wave, source, opened, closed, crew, prs, main_before, main_after, validation, score):
     db.execute("INSERT OR REPLACE INTO waves(wave, thread, opened, closed, crew, prs, main_before, main_after, validation, jobs_scored, mae_hours, bias_hours, late, early)"
                " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)", (wave, source, opened, closed, crew, prs, main_before, main_after, validation,
-                                                         score.jobs_scored, score.mae_hours, score.bias_hours, score.late, score.early))
+                                                         getattr(score, "jobs_scored", getattr(score, "delivered", 0)), getattr(score, "mae_hours", getattr(score, "mae", 0.0)),
+                                                         getattr(score, "bias_hours", getattr(score, "bias", 0.0)), score.late, score.early))
 
 
 def _close_text_score(db, source):
@@ -204,3 +205,56 @@ def test_without_cfg_ledger_nothing_is_written(tmp_path):
     assert "score:" not in closes(client)[0]
     assert not any(k.startswith(f"ledger:{THREAD}") for (k,) in store.db.execute("SELECT key FROM meta"))
     assert contracts.ref_of(closes(client)[0]) == CLOSE_REF
+
+
+# -- audit follow-ups: ledger errors fail soft; one score for the row and the post --------------------
+def locked(*a, **kw): raise sqlite3.OperationalError("database is locked")
+
+
+def test_a_ledger_error_is_a_wave_finding_the_wave_is_saved_and_run_once_returns(tmp_path, monkeypatch):
+    store, client, gh, clock, drv = world(tmp_path)
+    good = ledger.open_job
+    monkeypatch.setattr(ledger, "open_job", locked)
+    drv.run_once()  # returns: the error never reaches serve
+    w = stored(store)
+    assert [j.rnd().pr.get("number") for j in w.jobs] == [71, 72]  # the PR adoption was saved despite the ledger
+    assert any(f.startswith("ledger ") and "database is locked" in f for f in w.findings)
+    assert not any("database is locked" in t for _, t in client.posts)  # a finding, never a post
+    monkeypatch.setattr(ledger, "open_job", good)
+    clock.t += H
+    drv.run_once()
+    assert len(rows(tmp_path)) == 4  # the next pass writes what the failed one could not
+
+
+def test_a_ledger_error_at_the_close_still_closes_and_posts_the_wave(tmp_path, monkeypatch):
+    store, client, gh, clock, drv = world(tmp_path)
+    run_wave(store, client, gh, clock, drv, tmp_path)
+    monkeypatch.setattr(ledger, "write_wave", locked)
+    gh.merge(71, "1" * 40)
+    gh.merge(72, "2" * 40)
+    clock.t = T0 + 3 * H
+    drv.run_once()
+    w = stored(store)
+    assert w.closed_at is not None and w.pending == [] and len(closes(client)) == 1
+    assert any(f.startswith("ledger ") and "database is locked" in f for f in w.findings)
+
+
+def test_a_failing_ledger_connect_fails_soft(tmp_path, monkeypatch):
+    store, client, gh, clock, drv = world(tmp_path)
+    monkeypatch.setattr(ledger, "connect", locked)
+    drv.run_once()
+    w = stored(store)
+    assert [j.rnd().pr.get("number") for j in w.jobs] == [71, 72] and any("database is locked" in f for f in w.findings)
+
+
+def test_the_waves_row_and_the_close_post_carry_the_same_score(tmp_path):
+    store, client, gh, clock, drv = world(tmp_path)
+    run_wave(store, client, gh, clock, drv, tmp_path)  # job 2's code_audit is delivered at CHANGES_REQUESTED (T0+2h), not at the merge
+    gh.merge(71, "1" * 40)
+    gh.merge(72, "2" * 40)
+    clock.t = T0 + 3 * H
+    drv.run_once()
+    row = rows(tmp_path, "waves")[0]
+    line = next(ln for ln in closes(client)[0].splitlines() if ln.startswith("score: "))
+    assert (row["mae_hours"], row["bias_hours"], row["late"], row["early"]) == (1.5, -1.5, 0, 4)  # implement -1h x2, code_audit -2h x2
+    assert line == f"score: n=4, MAE {row['mae_hours']:.2f}h, bias {row['bias_hours']:+.2f}h, late {row['late']}, early {row['early']}"

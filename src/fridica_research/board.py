@@ -44,7 +44,9 @@ FIELDS = {
     "Stage": "SINGLE_SELECT", "Role": "SINGLE_SELECT", "Iteration": "NUMBER", "Generation": "NUMBER", "Projected hours": "NUMBER", "Actual hours": "NUMBER",
     "Started": "DATE", "Projected finish": "DATE", "Finished": "DATE",
     "Owner": "TEXT", "Approach": "TEXT", "Workers": "TEXT", "Result": "TEXT", "Thread": "TEXT", "Follow-on": "TEXT", "Peer reviewers": "TEXT",
+    "ETA": "TEXT", "At risk": "TEXT",
 }
+TEXT_KEYS = {"eta": "ETA", "at_risk": "At risk"}  # #111: the FM's ETA text and the at-risk mark ("yes"/""); `set_text` takes a key or the name
 BOARD_STAGE = {"Blocked": "Stopped"}
 
 _FIELD_NODES = "fields(first:100){nodes{... on ProjectV2Field{id name dataType} ... on ProjectV2SingleSelectField{id name dataType options{id name color description}} ... on ProjectV2IterationField{id name dataType}}}"
@@ -103,6 +105,12 @@ class Projects:
         self.remember, self.recall = remember, recall
         self._project: ProjectIds | None = None
         self.field_setup_failed = False
+        self.findings: list[str] = []  # #111: missing-field findings of the new setters, handed out once by `take_findings`
+        self._found: set[str] = set()
+
+    def take_findings(self) -> list[str]:
+        out, self.findings = self.findings, []
+        return out
 
     def graphql(self, query: str, **variables) -> dict:
         out = json.loads(self.run(["gh", "api", "graphql", "--input", "-"], json.dumps({"query": query, "variables": variables})))
@@ -179,7 +187,27 @@ class Projects:
             if value: self._set(M_SET_DATE, issue, name, date=value)
 
     def set_number(self, issue: int, field: str, value: float): self._set(M_SET_NUMBER, issue, field, v=float(value))
-    def set_text(self, issue: int, field: str, value: str): self._set(M_SET_TEXT, issue, field, v=str(value))
+    def set_text(self, issue: int, field: str, value: str):
+        name = TEXT_KEYS.get(field, field)
+        if name in TEXT_KEYS.values(): return self._set_quietly(issue, name, str(value))
+        self._set(M_SET_TEXT, issue, name, v=str(value))
+
+    def set_eta_text(self, issue: int, text: str) -> bool: return self._set_quietly(issue, "ETA", str(text))
+    def set_at_risk(self, issue: int, flag) -> bool: return self._set_quietly(issue, "At risk", "yes" if flag else "")
+
+    def _set_quietly(self, issue: int, name: str, value: str) -> bool:
+        """#111: a text write that never raises; a missing field is one finding per field for the client's life, other failures are logged."""
+        try:
+            self._set(M_SET_TEXT, issue, name, v=value)
+            return True
+        except MissingField:
+            if name not in self._found:
+                self._found.add(name)
+                self.findings.append(f"Board field {name!r} is missing from project {self.b.number}; its writes are skipped. Owner permission/setup action required.")
+                log.warning("board field %s is missing from project %s", name, self.b.number)
+        except Exception as e:  # noqa: BLE001 - the new setters never raise into the driver
+            log.warning("board %s write for #%s failed: %s", name, issue, e)
+        return False
     def set_option(self, issue: int, field: str, option: str):
         options = self.field(field)["options"]
         # A refused migration must not invent a value or block writes to other fields.

@@ -285,3 +285,66 @@ def alternatives(db: sqlite3.Connection, now: datetime, hours: float = FRESH_HOU
         if (s is not None and s >= eta.SESSION_QUOTA) or (w is not None and w >= eta.WEEKLY_CAP): continue
         ranked.append(((s is None or w is None, r["free_slots"] is None, -(r["free_slots"] or 0), w if w is not None else 0.0, name), name))
     return [name for _, name in sorted(ranked)]
+
+
+# -- #94: the row writers. Each is idempotent on its natural key and uses the tables above (no DDL change); times are UTC ISO.
+RESCHED = " (resched)"
+
+
+def _hours(a, b) -> float | None:
+    s, e = _when(a), _when(b)
+    return (e - s).total_seconds() / 3600.0 if s and e else None
+
+
+def _job(db: sqlite3.Connection, source: str, ref: str, role: str):
+    return db.execute("SELECT * FROM jobs WHERE source=? AND ref=? AND role=? ORDER BY id LIMIT 1", (source, ref, role)).fetchone()
+
+
+def open_job(db: sqlite3.Connection, *, source: str, ref: str, role: str, innie: str, input_at: str, eta: str, est_hours,
+             est_basis: str = "", nature: str = "", size: str = "") -> None:
+    """One `jobs` row per (source, ref, role). Its `eta` is the first committed ETA (R52) and is never changed: a later
+    call with another ETA only notes `re-estimate <iso>` in `notes`, once per ETA."""
+    row = _job(db, source, ref, role)
+    if row is None:
+        db.execute("INSERT INTO jobs(source, ref, role, innie, input_at, eta, est_hours, est_basis, nature, size) VALUES (?,?,?,?,?,?,?,?,?,?)",
+                   (source, ref, role, innie, input_at, eta, est_hours, est_basis, nature, size))
+    elif eta and eta != row["eta"] and f"re-estimate {eta}" not in (row["notes"] or ""):
+        db.execute("UPDATE jobs SET notes=? WHERE id=?", ("; ".join(x for x in (row["notes"], f"re-estimate {eta}") if x), row["id"]))
+    db.commit()
+
+
+def deliver(db: sqlite3.Connection, *, source: str, ref: str, role: str, delivered_at: str) -> None:
+    """Set `delivered_at`, `actual_hours` (from `input_at`) and `error_hours` (delivered - eta) on the (source, ref, role) row."""
+    row = _job(db, source, ref, role)
+    if row is None: return
+    db.execute("UPDATE jobs SET delivered_at=?, actual_hours=?, error_hours=? WHERE id=?",
+               (delivered_at, _hours(row["input_at"], delivered_at), _hours(row["eta"], delivered_at), row["id"]))
+    db.commit()
+
+
+def reschedule(db: sqlite3.Connection, *, source: str, ref: str, role: str, to_innie: str, eta: str, at: str) -> None:
+    """Record the cause on the original row (still scored against its first ETA when the job is delivered: the Wave C
+    convention) and open a `<role> (resched)` row for the new holder, which the score leaves out."""
+    row = _job(db, source, ref, role)
+    cause = f"rescheduled {at} to {to_innie}"
+    if row is not None and cause not in (row["delay_causes"] or ""):
+        db.execute("UPDATE jobs SET delay_causes=? WHERE id=?", ("; ".join(x for x in (row["delay_causes"], cause) if x), row["id"]))
+    open_job(db, source=source, ref=ref, role=role + RESCHED, innie=to_innie, input_at=at, eta=eta, est_hours=_hours(at, eta))
+
+
+def write_wave(db: sqlite3.Connection, *, wave: str, source: str, opened: str, closed: str, crew: str, prs: str, main_before: str,
+               main_after: str, validation: str, score) -> None:
+    """INSERT OR REPLACE the `waves` row named `wave` (thread `source`); `score` is an `eta.Score` or a `Scorecard`."""
+    if isinstance(score, Scorecard): n, mae, bias = score.delivered, score.mae, score.bias
+    else: n, mae, bias = score.jobs_scored, score.mae_hours, score.bias_hours
+    db.execute("INSERT OR REPLACE INTO waves(wave, thread, opened, closed, crew, prs, main_before, main_after, validation, jobs_scored, mae_hours,"
+               " bias_hours, late, early, max_late_hours, max_early_hours) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+               (wave, source, opened, closed, crew, prs, main_before, main_after, validation, n, mae, bias, score.late, score.early,
+                getattr(score, "max_late_hours", None), getattr(score, "max_early_hours", None)))
+    db.commit()
+
+
+def close_text_score(db: sqlite3.Connection, source: str) -> str:
+    """The close post's score line over `source`'s original-role rows (`(resched)` rows are left out)."""
+    c = card(db.execute("SELECT * FROM jobs WHERE source=? AND role NOT LIKE ? ORDER BY id", (source, "%" + RESCHED)).fetchall())
+    return f"n={c.delivered}, MAE {c.mae:.2f}h, bias {c.bias:+.2f}h, late {c.late}, early {c.early}"

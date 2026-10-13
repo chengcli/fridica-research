@@ -40,6 +40,7 @@
    "token_env": "GH_TOKEN"
   },
   "idle_sleep": 2.0,
+  "ledger": "",
   "llm_model": "haiku",
   "max_debate_rounds": 2,
   "max_generations": 5,

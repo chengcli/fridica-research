@@ -94,6 +94,7 @@ class Config:
     llm_model: str = "haiku"
     github: GitHub = field(default_factory=GitHub)
     repos: tuple[Repo, ...] = ()
+    ledger: str = ""  # #94: path of the job ledger (local state, never committed); empty -> no ledger writes
     register: str = ""  # #54 (R48): path of the Innie register (`[innie.<name>]` tables); empty -> no register, rosters unchecked
 
     def __post_init__(self):
@@ -180,7 +181,7 @@ def parse(text: str) -> Config:
         people={str(k): str(v) for k, v in raw.get("people", {}).items()}, llm_model=str(raw.get("llm_model", "haiku")),
         github=GitHub(bool(g.get("enabled", False)), str(g.get("token_env", "GH_TOKEN")), duration(g.get("poll_interval"), 120.0), duration(g.get("post_merge_window"), 7 * 86400.0), tuple(str(x) for x in g.get("bots", GitHub.bots)),
                       int(g.get("ack_tries", 5)), duration(g.get("ack_backoff"), 600.0)),
-        repos=repos, register=str(raw.get("register", "")),
+        repos=repos, register=str(raw.get("register", "")), ledger=str(raw.get("ledger", "")),
     )
 
 
